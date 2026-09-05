@@ -6,10 +6,11 @@ use tracing::{error, Level};
 use tracing_subscriber::FmtSubscriber;
 
 use syntropy_daemon::{AppConfig, DaemonService};
-use syntropy_exec::WorkspaceJail;
+use syntropy_exec::{AtomicPatchApplicator, PatchOptions, PtyMultiplexer, SpawnOptions, WorkspaceJail};
+use syntropy_orchestrator::{AgentTurnEngine, GeminiClient};
 use syntropy_proto::tunnel::{
     self, ApplyPatch, ApprovalRequest, ExecCommand, McpInvokeRequest,
-    TunnelServerFrame,
+    TunnelServerFrame, UserPrompt,
 };
 use syntropy_security::{CredentialBroker, KeyStore, MerkleAuditLedger, OAuthSession};
 use syntropy_tunnel::MockGatewayServer;
@@ -35,6 +36,24 @@ enum Commands {
     Auth {
         #[command(subcommand)]
         action: AuthCommands,
+    },
+
+    /// Run an end-to-end AI agent turn from application to cloud and back
+    Prompt {
+        /// Instruction or query to send to the swarm
+        text: String,
+
+        /// Run in offline dev-mock mode without network calls or API usage
+        #[arg(long, default_value = "false")]
+        dev: bool,
+
+        /// Model identifier (defaults to gemini-2.5-flash)
+        #[arg(short, long, default_value = "gemini-2.5-flash")]
+        model: String,
+
+        /// Explicit API key override (defaults to hardware keystore or GEMINI_API_KEY)
+        #[arg(short, long)]
+        api_key: Option<String>,
     },
 
     /// Start the background daemon service and connect to the agent gateway
@@ -72,6 +91,18 @@ enum AuthCommands {
     },
     /// Inspect active hardware-sealed OAuth session status
     Status,
+    /// Store an external API key (e.g. Gemini) in the hardware keystore
+    SetKey {
+        /// Provider name (e.g. gemini, anthropic, openai)
+        #[arg(short, long, default_value = "gemini")]
+        provider: String,
+
+        /// Secret API key to securely seal in keystore
+        #[arg(short, long)]
+        key: String,
+    },
+    /// Inspect configured API keys without revealing secrets
+    ShowKeys,
     /// Clear and purge active credentials from the keystore
     Logout,
 }
@@ -109,7 +140,7 @@ async fn main() -> Result<(), anyhow::Error> {
             #[cfg(not(target_os = "windows"))]
             let keystore: Arc<dyn KeyStore> = Arc::new(syntropy_security::InMemoryKeyStore::new());
 
-            let broker = CredentialBroker::new(keystore);
+            let broker = CredentialBroker::new(keystore.clone());
 
             match action {
                 AuthCommands::Login { account } => {
@@ -139,9 +170,132 @@ async fn main() -> Result<(), anyhow::Error> {
                         }
                     }
                 }
+                AuthCommands::SetKey { provider, key } => {
+                    let store_key = format!("syntropy:llm:{}", provider.to_lowercase());
+                    keystore.set(&store_key, key.as_bytes())?;
+                    println!("🔐 Secret key for '{}' successfully sealed in hardware keystore.", provider);
+                }
+                AuthCommands::ShowKeys => {
+                    let keys = keystore.list()?;
+                    println!("🔑 Sealed Keystore Entries:");
+                    let mut found = false;
+                    for k in keys {
+                        if k.starts_with("syntropy:llm:") {
+                            let prov = k.trim_start_matches("syntropy:llm:");
+                            println!("   - LLM Provider: {} [SEALED]", prov);
+                            found = true;
+                        } else if k == "syntropy:oauth_session" {
+                            println!("   - Single-Host OAuth Session [SEALED]");
+                            found = true;
+                        }
+                    }
+                    if !found {
+                        println!("   (No sealed keys or sessions found)");
+                    }
+                }
                 AuthCommands::Logout => {
                     broker.clear_oauth_session()?;
                     println!("🚪 Logged out. Active credentials purged from keystore.");
+                }
+            }
+        }
+
+        Commands::Prompt { text, dev, model, api_key } => {
+            #[cfg(target_os = "windows")]
+            let keystore: Arc<dyn KeyStore> = match syntropy_security::DpapiKeyStore::new() {
+                Ok(ks) => Arc::new(ks),
+                Err(_) => Arc::new(syntropy_security::InMemoryKeyStore::new()),
+            };
+            #[cfg(not(target_os = "windows"))]
+            let keystore: Arc<dyn KeyStore> = Arc::new(syntropy_security::InMemoryKeyStore::new());
+
+            let effective_key = if dev {
+                None
+            } else if let Some(k) = api_key {
+                Some(k)
+            } else if let Ok(Some(bytes)) = keystore.get("syntropy:llm:gemini") {
+                String::from_utf8(bytes).ok()
+            } else {
+                std::env::var("GEMINI_API_KEY").ok()
+            };
+
+            let client = match effective_key {
+                Some(key) if !dev && !key.trim().is_empty() => {
+                    println!("🌐 Connecting to Cloud Swarm with Gemini API (Model: {})...", model);
+                    GeminiClient::new(key, model)
+                }
+                _ => {
+                    println!("🛠️ Running turn in Dev Mock mode (Model: {}-dev-mock)...", model);
+                    GeminiClient::dev_mock()
+                }
+            };
+
+            let engine = AgentTurnEngine::new(Arc::new(client));
+            let prompt = UserPrompt {
+                prompt_id: format!("prompt-{}", uuid::Uuid::new_v4()),
+                text: text.clone(),
+                session_id: format!("cli-sess-{}", uuid::Uuid::new_v4()),
+                context_files: Default::default(),
+            };
+
+            println!("📤 User Prompt: \"{}\"", text);
+            let plan = engine.process_prompt(&prompt, "local-cli-agent").await?;
+
+            println!("\n🤖 Swarm Response:\n{}", plan.agent_message.content);
+
+            if !plan.agent_message.tool_calls.is_empty() {
+                println!("\n🔧 Dispatched Tool Actions: {:?}", plan.agent_message.tool_calls);
+                let jail = WorkspaceJail::new(&workspace_root)?;
+                let pty_mux = PtyMultiplexer::new();
+                let diff_app = AtomicPatchApplicator::new();
+                let audit_path = config.resolve_audit_path(&workspace_root);
+                if let Some(p) = audit_path.parent() {
+                    let _ = std::fs::create_dir_all(p);
+                }
+                let ledger = MerkleAuditLedger::open(&audit_path)?;
+
+                for frame in plan.server_frames_to_send {
+                    if let Some(payload) = frame.payload {
+                        match payload {
+                            tunnel::tunnel_server_frame::Payload::ExecCommand(cmd) => {
+                                println!("\n▶️ [Virtual PTY] Executing: {} {:?}", cmd.command, cmd.args);
+                                let cwd_path = if cmd.working_dir.is_empty() { None } else { Some(std::path::Path::new(&cmd.working_dir)) };
+                                let target_cwd = jail.validate_cwd(cwd_path)?;
+
+                                let mut spawn_opts = SpawnOptions::new(&cmd.command)
+                                    .args(cmd.args)
+                                    .cwd(target_cwd)
+                                    .pty(cmd.pty);
+                                if cmd.pty && cmd.pty_rows > 0 && cmd.pty_cols > 0 {
+                                    spawn_opts = spawn_opts.dimensions(cmd.pty_rows as u16, cmd.pty_cols as u16);
+                                }
+
+                                let mut rx = pty_mux.spawn_screen("cli-screen", spawn_opts)?;
+                                let mut full_output = Vec::new();
+                                while let Ok(chunk) = rx.recv().await {
+                                    print!("{}", String::from_utf8_lossy(&chunk.data));
+                                    full_output.extend_from_slice(&chunk.data);
+                                    if chunk.is_eof {
+                                        break;
+                                    }
+                                }
+                                ledger.append("local-cli-agent", "exec_command", &full_output)?;
+                                println!("   ✓ Execution complete. SHA-256 appended to Merkle ledger.");
+                            }
+                            tunnel::tunnel_server_frame::Payload::ApplyPatch(patch) => {
+                                println!("\n▶️ [Atomic Patch] Applying diff to: {}", patch.file_path);
+                                let target_path = jail.resolve_path(&patch.file_path)?;
+                                let opts = PatchOptions::new().dry_run(patch.dry_run);
+                                let result = diff_app.apply_patch(&target_path, &patch.diff, opts)?;
+                                ledger.append("local-cli-agent", "apply_patch", patch.diff.as_bytes())?;
+                                println!(
+                                    "   ✓ Patch applied ({} lines added, {} lines removed). Merkle ledger updated.",
+                                    result.lines_added, result.lines_removed
+                                );
+                            }
+                            _ => {}
+                        }
+                    }
                 }
             }
         }

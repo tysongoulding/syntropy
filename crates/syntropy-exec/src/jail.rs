@@ -212,13 +212,13 @@ impl WorkspaceJail {
     /// If `Some(cwd)`, ensures that `cwd` exists, is a directory, and is within the jail.
     pub fn validate_cwd(&self, cwd: Option<&Path>) -> Result<PathBuf, JailError> {
         match cwd {
-            None => Ok(self.canonical_root.clone()),
+            None => Ok(normalize_path_prefix(&self.canonical_root)),
             Some(dir) => {
                 let resolved = self.resolve_path(dir)?;
                 if !resolved.is_dir() {
                     return Err(JailError::InvalidWorkingDirectory(resolved));
                 }
-                Ok(resolved)
+                Ok(normalize_path_prefix(&resolved))
             }
         }
     }

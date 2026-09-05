@@ -1,9 +1,13 @@
 pub mod blackboard;
 pub mod blueprint;
+pub mod gemini;
+pub mod turn;
 pub mod workflow;
 
 pub use blackboard::{Artifact, BlackboardError, BlackboardStore};
 pub use blueprint::{AgentTier, PersonaBlueprint};
+pub use gemini::{ChatMessage, GeminiClient, GeminiConfig, GeminiToolCall, GeminiTurnResult};
+pub use turn::{AgentTurnEngine, TurnExecutionPlan};
 pub use workflow::{SprintPhase, SprintState, SprintWorkflow, WorkflowError};
 
 #[cfg(test)]
@@ -80,5 +84,56 @@ mod tests {
         // Review passes
         workflow.finish_review(b"Tests pass", true).await.unwrap();
         assert_eq!(workflow.current_phase().await, SprintPhase::Completed);
+    }
+
+    #[tokio::test]
+    async fn test_gemini_dev_mock_reasoning() {
+        let client = GeminiClient::dev_mock();
+        assert!(client.is_dev_mock());
+
+        // Test listing command generation
+        let res = client.generate_turn("List the files in the current repository", None, &[]).await.unwrap();
+        assert!(res.is_dev_mock);
+        assert_eq!(res.tool_calls.len(), 1);
+        assert_eq!(res.tool_calls[0].name, "exec_command");
+
+        // Test patch command generation
+        let res_patch = client.generate_turn("Apply patch to config.json", None, &[]).await.unwrap();
+        assert_eq!(res_patch.tool_calls.len(), 1);
+        assert_eq!(res_patch.tool_calls[0].name, "apply_patch");
+    }
+
+    #[tokio::test]
+    async fn test_gemini_turn_engine_dispatches_tool_frames() {
+        let client = std::sync::Arc::new(GeminiClient::dev_mock());
+        let engine = AgentTurnEngine::new(client);
+
+        let prompt = syntropy_proto::tunnel::UserPrompt {
+            prompt_id: "prompt-123".into(),
+            text: "List files in directory".into(),
+            session_id: "sess-abc".into(),
+            context_files: Default::default(),
+        };
+
+        let plan = engine.process_prompt(&prompt, "test-agent").await.unwrap();
+        assert_eq!(plan.prompt_id, "prompt-123");
+        assert!(plan.is_dev_mock);
+        assert!(!plan.server_frames_to_send.is_empty());
+        assert_eq!(plan.agent_message.tool_calls, vec!["exec_command"]);
+    }
+
+    #[tokio::test]
+    async fn test_gemini_live_turn_if_key_available() {
+        if let Ok(key) = std::env::var("GEMINI_LIVE_TEST_KEY") {
+            if !key.trim().is_empty() {
+                let client = GeminiClient::new(key, "gemini-2.5-flash");
+                let res = client
+                    .generate_turn("Reply with the exact word PONG and nothing else.", None, &[])
+                    .await;
+                assert!(res.is_ok(), "Live Gemini API call failed: {:?}", res.err());
+                let turn = res.unwrap();
+                assert!(!turn.content.is_empty());
+            }
+        }
     }
 }

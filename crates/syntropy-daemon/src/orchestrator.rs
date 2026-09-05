@@ -122,6 +122,14 @@ impl Orchestrator {
                 ));
                 let _ = self.client_tx.send(ack).await;
             }
+            tunnel::tunnel_server_frame::Payload::AgentMessage(msg) => {
+                info!(
+                    turn_id = %msg.turn_id,
+                    content = %msg.content,
+                    is_final = msg.is_final,
+                    "AgentMessage received from Cloud Swarm"
+                );
+            }
             _ => {}
         }
     }

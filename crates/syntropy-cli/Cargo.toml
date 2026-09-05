@@ -16,6 +16,7 @@ syntropy-exec = { workspace = true }
 syntropy-security = { workspace = true }
 syntropy-mcp = { workspace = true }
 syntropy-daemon = { workspace = true }
+syntropy-orchestrator = { workspace = true }
 clap = { workspace = true }
 tokio = { workspace = true }
 tonic = { workspace = true }

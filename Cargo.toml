@@ -27,6 +27,7 @@ syntropy-exec = { path = "crates/syntropy-exec" }
 syntropy-security = { path = "crates/syntropy-security" }
 syntropy-mcp = { path = "crates/syntropy-mcp" }
 syntropy-daemon = { path = "crates/syntropy-daemon" }
+syntropy-orchestrator = { path = "services/swarm-orchestrator" }
 
 # Async & Networking
 tokio = { version = "1.43", features = ["full"] }
@@ -36,6 +37,7 @@ prost = "0.13"
 prost-types = "0.13"
 futures = "0.3"
 async-trait = "0.1"
+reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
 
 # Serialization & Data
 serde = { version = "1.0", features = ["derive"] }
