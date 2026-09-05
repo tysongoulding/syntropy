@@ -1,0 +1,60 @@
+[workspace]
+resolver = "2"
+members = [
+    "crates/syntropy-proto",
+    "crates/syntropy-tunnel",
+    "crates/syntropy-exec",
+    "crates/syntropy-security",
+    "crates/syntropy-mcp",
+    "crates/syntropy-daemon",
+    "crates/syntropy-cli",
+]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+authors = ["Syntropy Team"]
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/tysongoulding/syntropy"
+
+[workspace.dependencies]
+# Internal workspace crates
+syntropy-proto = { path = "crates/syntropy-proto" }
+syntropy-tunnel = { path = "crates/syntropy-tunnel" }
+syntropy-exec = { path = "crates/syntropy-exec" }
+syntropy-security = { path = "crates/syntropy-security" }
+syntropy-mcp = { path = "crates/syntropy-mcp" }
+syntropy-daemon = { path = "crates/syntropy-daemon" }
+
+# Async & Networking
+tokio = { version = "1.43", features = ["full"] }
+tokio-stream = { version = "0.1", features = ["net"] }
+tonic = "0.12"
+prost = "0.13"
+prost-types = "0.13"
+futures = "0.3"
+async-trait = "0.1"
+
+# Serialization & Data
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+toml = "0.8"
+uuid = { version = "1.13", features = ["v4", "serde"] }
+chrono = { version = "0.4", features = ["serde"] }
+
+# Terminal & PTY
+portable-pty = "0.8"
+
+# Security, Hashing & Storage
+rusqlite = { version = "0.33", features = ["bundled"] }
+sha2 = "0.10"
+hex = "0.4"
+directories-next = "2.0"
+
+# CLI & Observability
+clap = { version = "4.5", features = ["derive", "env"] }
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+thiserror = "2.0"
+anyhow = "1.0"
+similar = "2.6"

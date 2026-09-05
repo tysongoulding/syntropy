@@ -1,0 +1,27 @@
+[package]
+name = "syntropy-cli"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+
+[[bin]]
+name = "syntropy"
+path = "src/main.rs"
+
+[dependencies]
+syntropy-proto = { workspace = true }
+syntropy-tunnel = { workspace = true }
+syntropy-exec = { workspace = true }
+syntropy-security = { workspace = true }
+syntropy-mcp = { workspace = true }
+syntropy-daemon = { workspace = true }
+clap = { workspace = true }
+tokio = { workspace = true }
+tonic = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
+thiserror = { workspace = true }
+anyhow = { workspace = true }
+uuid = { workspace = true }
+chrono = { workspace = true }

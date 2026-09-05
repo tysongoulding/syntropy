@@ -1,0 +1,16 @@
+/target
+**/*.rs.bk
+Cargo.lock
+
+# Syntropy runtime state
+.syntropy/
+*.db
+*.db-journal
+*.log
+
+# Environment & Secrets
+.env
+.env.*
+!*.example
+credentials.json
+token.json

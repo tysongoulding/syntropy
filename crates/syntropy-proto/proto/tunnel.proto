@@ -1,0 +1,145 @@
+syntax = "proto3";
+
+package syntropy.tunnel;
+
+// Bidirectional streaming tunnel service connecting agents with the gateway.
+service AgentTunnelService {
+  rpc OpenTunnel(stream TunnelClientFrame) returns (stream TunnelServerFrame);
+}
+
+// Multiplexed frame sent from Server (Gateway) to Client (Agent).
+message TunnelServerFrame {
+  string frame_id = 1;
+  int64 timestamp_unix_ms = 2;
+
+  oneof payload {
+    Heartbeat heartbeat = 10;
+    ExecCommand exec_command = 11;
+    TerminalInputChunk terminal_input = 12;
+    ApplyPatch apply_patch = 13;
+    McpInvokeRequest mcp_request = 14;
+    ApprovalResponse approval_response = 15;
+    ApprovalRequest approval_request = 16;
+    TerminalOutputChunk terminal_output = 17;
+    PatchResult patch_result = 18;
+    McpInvokeResponse mcp_response = 19;
+    string error_frame = 20;
+  }
+}
+
+// Multiplexed frame sent from Client (Agent) to Server (Gateway).
+message TunnelClientFrame {
+  string frame_id = 1;
+  int64 timestamp_unix_ms = 2;
+  string agent_id = 3;
+
+  oneof payload {
+    Heartbeat heartbeat = 10;
+    TerminalOutputChunk terminal_output = 11;
+    PatchResult patch_result = 12;
+    McpInvokeResponse mcp_response = 13;
+    ApprovalRequest approval_request = 14;
+    ApprovalResponse approval_response = 15;
+    ExecCommand exec_command = 16;
+    TerminalInputChunk terminal_input = 17;
+    ApplyPatch apply_patch = 18;
+    McpInvokeRequest mcp_request = 19;
+    string error_frame = 20;
+  }
+}
+
+// Execution instruction sent to run a shell/process or open a PTY session.
+message ExecCommand {
+  string command_id = 1;
+  string command = 2;
+  repeated string args = 3;
+  string working_dir = 4;
+  map<string, string> env = 5;
+  uint32 timeout_seconds = 6;
+  bool pty = 7;
+  uint32 pty_rows = 8;
+  uint32 pty_cols = 9;
+}
+
+// Chunk of output (stdout, stderr, or PTY stream) streamed back from execution.
+message TerminalOutputChunk {
+  string session_id = 1;
+  bytes data = 2;
+  bool is_stderr = 3;
+  bool is_eof = 4;
+  int32 exit_code = 5;
+}
+
+// Input chunk (stdin keystrokes or terminal resize events) sent into an execution.
+message TerminalInputChunk {
+  string session_id = 1;
+  bytes data = 2;
+  bool is_eof = 3;
+  bool resize = 4;
+  uint32 pty_rows = 5;
+  uint32 pty_cols = 6;
+}
+
+// Instruction to apply a unified diff or patch to a repository file.
+message ApplyPatch {
+  string patch_id = 1;
+  string file_path = 2;
+  string diff = 3;
+  string expected_sha256 = 4;
+  bool dry_run = 5;
+}
+
+// Result of a patch application attempt.
+message PatchResult {
+  string patch_id = 1;
+  string file_path = 2;
+  bool success = 3;
+  string error_message = 4;
+  string new_sha256 = 5;
+  uint32 lines_added = 6;
+  uint32 lines_removed = 7;
+}
+
+// MCP tool invocation request forwarded through the tunnel.
+message McpInvokeRequest {
+  string invocation_id = 1;
+  string server_name = 2;
+  string tool_name = 3;
+  string arguments_json = 4;
+  uint32 timeout_seconds = 5;
+}
+
+// MCP tool invocation result returned from the host.
+message McpInvokeResponse {
+  string invocation_id = 1;
+  bool success = 2;
+  string result_json = 3;
+  string error_message = 4;
+}
+
+// Approval request when dual/human-in-the-loop authorization is required.
+message ApprovalRequest {
+  string request_id = 1;
+  string action_type = 2;
+  string description = 3;
+  string details_json = 4;
+  string requested_by = 5;
+  int64 created_at_unix = 6;
+}
+
+// Approval response granting or denying permission.
+message ApprovalResponse {
+  string request_id = 1;
+  bool approved = 2;
+  string reason = 3;
+  string approved_by = 4;
+  int64 responded_at_unix = 5;
+}
+
+// Heartbeat ping/pong frame for liveness monitoring.
+message Heartbeat {
+  int64 sequence = 1;
+  int64 timestamp_unix_ms = 2;
+  string agent_id = 3;
+  bool is_ack = 4;
+}

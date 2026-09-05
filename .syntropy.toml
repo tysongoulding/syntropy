@@ -1,0 +1,26 @@
+[project]
+name = "syntropy"
+version = "0.1.0"
+root_jail = true
+allowed_paths = ["."]
+
+[daemon]
+server_url = "https://gateway.syntropy.cloud:50051"
+heartbeat_interval_secs = 10
+reconnect_max_backoff_secs = 30
+
+[pty]
+default_shell = "default"
+max_scrollback_lines = 10000
+buffer_replay_limit = 500
+
+[security]
+keystore_provider = "auto"
+approval_mode = "dual" # "interactive", "webhook", "dual"
+audit_ledger = true
+audit_db_path = ".syntropy/audit.db"
+
+[mcp]
+enabled = true
+allowlist = ["*"]
+command_timeout_secs = 120
