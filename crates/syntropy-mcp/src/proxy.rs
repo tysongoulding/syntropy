@@ -202,6 +202,11 @@ impl McpProxy {
         self.allowlist.clone()
     }
 
+    /// Check directly whether a tool is permitted by the allowlist.
+    pub async fn is_tool_allowed(&self, tool_name: &str) -> bool {
+        self.allowlist.read().await.is_allowed(tool_name)
+    }
+
     /// Check whether a JSON-RPC request is permitted by the allowlist.
     /// Returns Ok(()) if permitted, or Err(JsonRpcResponse) with an error payload if denied.
     #[allow(clippy::result_large_err)]

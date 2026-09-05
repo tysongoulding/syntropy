@@ -13,6 +13,7 @@ pub use keystore::{dpapi, DpapiKeyStore};
 
 pub use broker::{
     compute_hmac_sha256, BrokerAction, BrokerError, CredentialBinding, CredentialBroker,
+    OAuthSession,
 };
 
 pub use ledger::{

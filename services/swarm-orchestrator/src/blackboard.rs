@@ -59,8 +59,7 @@ impl BlackboardStore {
         let mut map = self.artifacts.write().await;
         let history = map.entry(uri.to_string()).or_default();
 
-        if let Some(latest) = history.last() {
-            // Author isolation check
+        let version = if let Some(latest) = history.last() {
             if latest.author_agent != author_agent && !author_agent.starts_with("lead_") {
                 return Err(BlackboardError::AccessDenied {
                     agent: author_agent.to_string(),
@@ -68,29 +67,21 @@ impl BlackboardStore {
                     owner: latest.author_agent.clone(),
                 });
             }
-            let version = latest.version + 1;
-            let artifact = Artifact {
-                uri: uri.to_string(),
-                author_agent: author_agent.to_string(),
-                version,
-                content,
-                sha256,
-                created_at_unix_ms: chrono::Utc::now().timestamp_millis(),
-            };
-            history.push(artifact.clone());
-            Ok(artifact)
+            latest.version + 1
         } else {
-            let artifact = Artifact {
-                uri: uri.to_string(),
-                author_agent: author_agent.to_string(),
-                version: 1,
-                content,
-                sha256,
-                created_at_unix_ms: chrono::Utc::now().timestamp_millis(),
-            };
-            history.push(artifact.clone());
-            Ok(artifact)
-        }
+            1
+        };
+
+        let artifact = Artifact {
+            uri: uri.to_string(),
+            author_agent: author_agent.to_string(),
+            version,
+            content,
+            sha256,
+            created_at_unix_ms: chrono::Utc::now().timestamp_millis(),
+        };
+        history.push(artifact.clone());
+        Ok(artifact)
     }
 
     /// Read the latest version of an artifact by URI.

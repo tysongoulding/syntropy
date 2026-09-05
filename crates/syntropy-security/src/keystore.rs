@@ -174,7 +174,11 @@ impl EncryptedFileKeyStore {
             }
         }
 
-        let temp_path = self.path.with_extension("tmp");
+        let temp_path = self.path.with_file_name(format!(
+            "{}.tmp.{}",
+            self.path.file_name().and_then(|n| n.to_str()).unwrap_or("keystore"),
+            uuid::Uuid::new_v4()
+        ));
         {
             let mut file = File::create(&temp_path)?;
             file.write_all(&encrypted_payload)?;
@@ -478,6 +482,17 @@ pub struct DpapiKeyStore {
 
 #[cfg(target_os = "windows")]
 impl DpapiKeyStore {
+    pub fn default_path() -> Result<PathBuf, KeyStoreError> {
+        let base = directories_next::ProjectDirs::from("com", "syntropy", "syntropy")
+            .ok_or_else(|| KeyStoreError::Io(std::io::Error::new(std::io::ErrorKind::NotFound, "Could not determine project directories")))?;
+        Ok(base.data_local_dir().join("keystore.dpapi"))
+    }
+
+    pub fn new() -> Result<Self, KeyStoreError> {
+        let path = Self::default_path()?;
+        Self::open_or_create(path)
+    }
+
     pub fn open_or_create(path: impl AsRef<Path>) -> Result<Self, KeyStoreError> {
         let path = path.as_ref().to_path_buf();
         let entries = if path.exists() {

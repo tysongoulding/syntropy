@@ -43,8 +43,8 @@ resources:
           spec:
             containers:
               - name: syntropy-gateway
-                image: gcr.io/google-containers/busybox
-                command: ["sh", "-c", "echo Starting Syntropy Gateway; while true; do sleep 3600; done"]
+                image: ghcr.io/tysongoulding/syntropy-cloud:latest
+                command: ["syntropy-gateway", "--bind", "0.0.0.0:50051"]
                 stdin: false
                 tty: false
             restartPolicy: Always

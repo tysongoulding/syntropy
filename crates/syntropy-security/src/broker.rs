@@ -1,5 +1,6 @@
 use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, RwLock};
+use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use thiserror::Error;
 
@@ -101,13 +102,50 @@ pub struct CredentialBroker {
     bindings: Arc<RwLock<HashMap<String, CredentialBinding>>>,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct OAuthSession {
+    pub account_id: String,
+    pub access_token: String,
+    pub refresh_token: String,
+    pub token_type: String,
+    pub expires_at_unix: i64,
+}
+
 impl CredentialBroker {
+    pub const OAUTH_KEY: &'static str = "syntropy:oauth_session";
+
     /// Create a new CredentialBroker backed by the given KeyStore.
     pub fn new(keystore: Arc<dyn KeyStore>) -> Self {
         Self {
             keystore,
             bindings: Arc::new(RwLock::new(HashMap::new())),
         }
+    }
+
+    /// Save an OAuth 2.0 PKCE session securely into the underlying hardware or encrypted keystore.
+    pub fn save_oauth_session(&self, session: &OAuthSession) -> Result<(), BrokerError> {
+        let json = serde_json::to_vec(session)
+            .map_err(|e| BrokerError::InvalidEncoding(e.to_string()))?;
+        self.keystore.set(Self::OAUTH_KEY, &json)?;
+        Ok(())
+    }
+
+    /// Retrieve the active OAuth session from the hardware keystore.
+    pub fn get_oauth_session(&self) -> Result<Option<OAuthSession>, BrokerError> {
+        match self.keystore.get(Self::OAUTH_KEY)? {
+            Some(bytes) => {
+                let session = serde_json::from_slice(&bytes)
+                    .map_err(|e| BrokerError::InvalidEncoding(e.to_string()))?;
+                Ok(Some(session))
+            }
+            None => Ok(None),
+        }
+    }
+
+    /// Clear the active OAuth session from the keystore.
+    pub fn clear_oauth_session(&self) -> Result<(), BrokerError> {
+        let _ = self.keystore.delete(Self::OAUTH_KEY);
+        Ok(())
     }
 
     /// Register a credential handle with permitted actions.
@@ -411,5 +449,29 @@ mod tests {
         let log_output = "Error: Failed response with auth token xoxb-9988776655";
         let redacted = broker.sanitize_output(log_output);
         assert_eq!(redacted, "Error: Failed response with auth token [REDACTED:slack-bot]");
+    }
+
+    #[test]
+    fn test_oauth_session_keystore_lifecycle() {
+        let keystore = Arc::new(InMemoryKeyStore::new());
+        let broker = CredentialBroker::new(keystore);
+
+        assert!(broker.get_oauth_session().unwrap().is_none());
+
+        let session = OAuthSession {
+            account_id: "user_test_123".into(),
+            access_token: "access_token_secret".into(),
+            refresh_token: "refresh_token_secret".into(),
+            token_type: "Bearer".into(),
+            expires_at_unix: 1800000000,
+        };
+
+        broker.save_oauth_session(&session).unwrap();
+
+        let retrieved = broker.get_oauth_session().unwrap().unwrap();
+        assert_eq!(retrieved, session);
+
+        broker.clear_oauth_session().unwrap();
+        assert!(broker.get_oauth_session().unwrap().is_none());
     }
 }

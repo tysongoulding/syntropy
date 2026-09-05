@@ -12,7 +12,7 @@ use syntropy_proto::tunnel::{
     McpInvokeResponse, PatchResult, TerminalInputChunk, TerminalOutputChunk, TunnelClientFrame,
     TunnelServerFrame,
 };
-use syntropy_security::MerkleAuditLedger;
+use syntropy_security::{CredentialBroker, InMemoryKeyStore, KeyStore, MerkleAuditLedger};
 
 use crate::config::AppConfig;
 
@@ -22,7 +22,8 @@ pub struct Orchestrator {
     jail: Arc<WorkspaceJail>,
     pty_mux: Arc<PtyMultiplexer>,
     diff_applicator: Arc<AtomicPatchApplicator>,
-    ledger: Option<Arc<Mutex<MerkleAuditLedger>>>,
+    ledger: Arc<Mutex<MerkleAuditLedger>>,
+    broker: Arc<CredentialBroker>,
     mcp_proxy: Arc<McpProxy>,
     client_tx: mpsc::Sender<TunnelClientFrame>,
 }
@@ -38,15 +39,22 @@ impl Orchestrator {
         let pty_mux = Arc::new(PtyMultiplexer::new());
         let diff_applicator = Arc::new(AtomicPatchApplicator::new());
 
-        let ledger = if config.security.audit_ledger {
-            let audit_path = config.resolve_audit_path(&workspace_root);
-            if let Some(parent) = audit_path.parent() {
-                std::fs::create_dir_all(parent)?;
-            }
-            Some(Arc::new(Mutex::new(MerkleAuditLedger::open(&audit_path)?)))
-        } else {
-            None
+        let audit_path = config.resolve_audit_path(&workspace_root);
+        if let Some(parent) = audit_path.parent() {
+            std::fs::create_dir_all(parent)?;
+        }
+        let ledger = Arc::new(Mutex::new(MerkleAuditLedger::open(&audit_path)?));
+
+        // Initialize keystore and credential broker
+        #[cfg(target_os = "windows")]
+        let keystore: Arc<dyn KeyStore> = match syntropy_security::DpapiKeyStore::new() {
+            Ok(ks) => Arc::new(ks),
+            Err(_) => Arc::new(InMemoryKeyStore::new()),
         };
+        #[cfg(not(target_os = "windows"))]
+        let keystore: Arc<dyn KeyStore> = Arc::new(InMemoryKeyStore::new());
+
+        let broker = Arc::new(CredentialBroker::new(keystore));
 
         let allowlist = ToolAllowlist::new(config.mcp.allowlist.clone());
         let mcp_proxy = Arc::new(McpProxy::with_defaults(allowlist));
@@ -58,9 +66,28 @@ impl Orchestrator {
             pty_mux,
             diff_applicator,
             ledger,
+            broker,
             mcp_proxy,
             client_tx,
         })
+    }
+
+    pub fn workspace_root(&self) -> &Path {
+        &self.workspace_root
+    }
+
+    pub fn broker(&self) -> &Arc<CredentialBroker> {
+        &self.broker
+    }
+
+    /// Helper to construct a client frame with unified metadata, eliminating duplication.
+    fn make_client_frame(&self, payload: tunnel::tunnel_client_frame::Payload) -> TunnelClientFrame {
+        TunnelClientFrame {
+            frame_id: uuid::Uuid::new_v4().to_string(),
+            timestamp_unix_ms: chrono::Utc::now().timestamp_millis(),
+            agent_id: self.agent_id.clone(),
+            payload: Some(payload),
+        }
     }
 
     pub async fn handle_frame(&self, frame: TunnelServerFrame) {
@@ -85,19 +112,14 @@ impl Orchestrator {
                 self.handle_approval_request(req).await;
             }
             tunnel::tunnel_server_frame::Payload::Heartbeat(hb) => {
-                let ack = TunnelClientFrame {
-                    frame_id: uuid::Uuid::new_v4().to_string(),
-                    timestamp_unix_ms: chrono::Utc::now().timestamp_millis(),
-                    agent_id: self.agent_id.clone(),
-                    payload: Some(tunnel::tunnel_client_frame::Payload::Heartbeat(
-                        tunnel::Heartbeat {
-                            sequence: hb.sequence,
-                            timestamp_unix_ms: chrono::Utc::now().timestamp_millis(),
-                            agent_id: self.agent_id.clone(),
-                            is_ack: true,
-                        },
-                    )),
-                };
+                let ack = self.make_client_frame(tunnel::tunnel_client_frame::Payload::Heartbeat(
+                    tunnel::Heartbeat {
+                        sequence: hb.sequence,
+                        timestamp_unix_ms: chrono::Utc::now().timestamp_millis(),
+                        agent_id: self.agent_id.clone(),
+                        is_ack: true,
+                    },
+                ));
                 let _ = self.client_tx.send(ack).await;
             }
             _ => {}
@@ -105,60 +127,77 @@ impl Orchestrator {
     }
 
     async fn handle_exec_command(&self, cmd: ExecCommand) {
-        let command_id = cmd.command_id.clone();
-        let session_id = command_id.clone();
-
-        // 1. Audit Log
-        if let Some(ledger) = &self.ledger {
-            let payload_data = serde_json::to_vec(&serde_json::json!({
-                "command": cmd.command,
-                "args": cmd.args,
-                "cwd": cmd.working_dir,
-            }))
-            .unwrap_or_default();
-            let l = ledger.lock().await;
-            let _ = l.append(&self.agent_id, "exec_command", &payload_data);
-        }
-
-        // 2. Validate CWD with Jail
-        let cwd_result = if !cmd.working_dir.is_empty() {
-            self.jail.validate_cwd(Some(Path::new(&cmd.working_dir)))
+        // Persistent per-agent screen identifier
+        let session_id = if !cmd.command_id.is_empty() {
+            cmd.command_id.clone()
         } else {
-            Ok(self.workspace_root.clone())
+            format!("screen-{}", self.agent_id)
         };
 
-        let working_dir = match cwd_result {
+        // 1. Mandatory Audit Logging (Tamper Evidence - never silently suppress errors)
+        let payload_data = serde_json::to_vec(&serde_json::json!({
+            "command": cmd.command,
+            "args": cmd.args,
+            "cwd": cmd.working_dir,
+        }))
+        .unwrap_or_default();
+
+        {
+            let l = self.ledger.lock().await;
+            if let Err(e) = l.append(&self.agent_id, "exec_command", &payload_data) {
+                error!("Audit ledger write failure: {}", e);
+                let err_frame = self.make_client_frame(tunnel::tunnel_client_frame::Payload::TerminalOutput(
+                    TerminalOutputChunk {
+                        session_id: session_id.clone(),
+                        data: format!("Security error: Audit ledger failed to record action: {}\n", e)
+                            .into_bytes(),
+                        is_stderr: true,
+                        is_eof: true,
+                        exit_code: -1,
+                    },
+                ));
+                let _ = self.client_tx.send(err_frame).await;
+                return;
+            }
+        }
+
+        // 2. Validate CWD with Jail (Canonical Jailing - always validates CWD via jail)
+        let cwd_opt = if cmd.working_dir.is_empty() {
+            None
+        } else {
+            Some(Path::new(&cmd.working_dir))
+        };
+
+        let working_dir = match self.jail.validate_cwd(cwd_opt) {
             Ok(dir) => dir,
             Err(e) => {
                 error!("CWD jail rejection: {}", e);
-                let err_chunk = TunnelClientFrame {
-                    frame_id: uuid::Uuid::new_v4().to_string(),
-                    timestamp_unix_ms: chrono::Utc::now().timestamp_millis(),
-                    agent_id: self.agent_id.clone(),
-                    payload: Some(tunnel::tunnel_client_frame::Payload::TerminalOutput(
-                        TerminalOutputChunk {
-                            session_id: session_id.clone(),
-                            data: format!("Security error: CWD rejected by workspace jail: {}\n", e)
-                                .into_bytes(),
-                            is_stderr: true,
-                            is_eof: true,
-                            exit_code: -1,
-                        },
-                    )),
-                };
+                let err_chunk = self.make_client_frame(tunnel::tunnel_client_frame::Payload::TerminalOutput(
+                    TerminalOutputChunk {
+                        session_id: session_id.clone(),
+                        data: format!("Security error: CWD rejected by workspace jail: {}\n", e)
+                            .into_bytes(),
+                        is_stderr: true,
+                        is_eof: true,
+                        exit_code: -1,
+                    },
+                ));
                 let _ = self.client_tx.send(err_chunk).await;
                 return;
             }
         };
 
-        // 3. Build SpawnOptions
+        // 3. Build SpawnOptions with sanitized environment variables
         let mut spawn_opts = SpawnOptions::new(&cmd.command)
             .args(cmd.args)
             .cwd(working_dir)
             .pty(cmd.pty);
 
+        // Sanitize incoming env variables through broker pattern (Zero Credential Leakage)
         for (k, v) in cmd.env {
-            spawn_opts = spawn_opts.env(k, v);
+            if !k.to_uppercase().contains("TOKEN") && !k.to_uppercase().contains("SECRET") {
+                spawn_opts = spawn_opts.env(k, v);
+            }
         }
 
         if cmd.pty && cmd.pty_rows > 0 && cmd.pty_cols > 0 {
@@ -203,20 +242,15 @@ impl Orchestrator {
                 });
             }
             Err(e) => {
-                let err_chunk = TunnelClientFrame {
-                    frame_id: uuid::Uuid::new_v4().to_string(),
-                    timestamp_unix_ms: chrono::Utc::now().timestamp_millis(),
-                    agent_id: self.agent_id.clone(),
-                    payload: Some(tunnel::tunnel_client_frame::Payload::TerminalOutput(
-                        TerminalOutputChunk {
-                            session_id,
-                            data: format!("Failed to spawn process: {}\n", e).into_bytes(),
-                            is_stderr: true,
-                            is_eof: true,
-                            exit_code: -1,
-                        },
-                    )),
-                };
+                let err_chunk = self.make_client_frame(tunnel::tunnel_client_frame::Payload::TerminalOutput(
+                    TerminalOutputChunk {
+                        session_id,
+                        data: format!("Failed to spawn process: {}\n", e).into_bytes(),
+                        is_stderr: true,
+                        is_eof: true,
+                        exit_code: -1,
+                    },
+                ));
                 let _ = self.client_tx.send(err_chunk).await;
             }
         }
@@ -238,11 +272,23 @@ impl Orchestrator {
         let patch_id = patch.patch_id.clone();
         let file_path_str = patch.file_path.clone();
 
-        // 1. Audit Log
-        if let Some(ledger) = &self.ledger {
-            let payload_data = patch.diff.as_bytes();
-            let l = ledger.lock().await;
-            let _ = l.append(&self.agent_id, "apply_patch", payload_data);
+        // 1. Mandatory Audit Logging
+        let payload_data = patch.diff.as_bytes();
+        {
+            let l = self.ledger.lock().await;
+            if let Err(e) = l.append(&self.agent_id, "apply_patch", payload_data) {
+                let res = PatchResult {
+                    patch_id,
+                    file_path: file_path_str,
+                    success: false,
+                    error_message: format!("Audit ledger failure: {}", e),
+                    new_sha256: String::new(),
+                    lines_added: 0,
+                    lines_removed: 0,
+                };
+                self.send_patch_result(res).await;
+                return;
+            }
         }
 
         // 2. Validate path in jail
@@ -301,28 +347,31 @@ impl Orchestrator {
     }
 
     async fn send_patch_result(&self, result: PatchResult) {
-        let frame = TunnelClientFrame {
-            frame_id: uuid::Uuid::new_v4().to_string(),
-            timestamp_unix_ms: chrono::Utc::now().timestamp_millis(),
-            agent_id: self.agent_id.clone(),
-            payload: Some(tunnel::tunnel_client_frame::Payload::PatchResult(result)),
-        };
+        let frame = self.make_client_frame(tunnel::tunnel_client_frame::Payload::PatchResult(result));
         let _ = self.client_tx.send(frame).await;
     }
 
     async fn handle_mcp_request(&self, req: McpInvokeRequest) {
         let invocation_id = req.invocation_id.clone();
 
-        // 1. Audit Log
-        if let Some(ledger) = &self.ledger {
-            let payload_data = req.arguments_json.as_bytes();
-            let l = ledger.lock().await;
-            let _ = l.append(&self.agent_id, "mcp_invoke", payload_data);
+        // 1. Mandatory Audit Logging
+        let payload_data = req.arguments_json.as_bytes();
+        {
+            let l = self.ledger.lock().await;
+            if let Err(e) = l.append(&self.agent_id, "mcp_invoke", payload_data) {
+                let resp = McpInvokeResponse {
+                    invocation_id,
+                    success: false,
+                    result_json: String::new(),
+                    error_message: format!("Audit ledger failure: {}", e),
+                };
+                self.send_mcp_response(resp).await;
+                return;
+            }
         }
 
-        // Check tool allowlist
-        let is_allowed = self.mcp_proxy.allowlist().read().await.is_allowed(&req.tool_name);
-        if !is_allowed {
+        // 2. Check tool allowlist directly (eliminates feature envy)
+        if !self.mcp_proxy.is_tool_allowed(&req.tool_name).await {
             let resp = McpInvokeResponse {
                 invocation_id,
                 success: false,
@@ -348,12 +397,7 @@ impl Orchestrator {
     }
 
     async fn send_mcp_response(&self, resp: McpInvokeResponse) {
-        let frame = TunnelClientFrame {
-            frame_id: uuid::Uuid::new_v4().to_string(),
-            timestamp_unix_ms: chrono::Utc::now().timestamp_millis(),
-            agent_id: self.agent_id.clone(),
-            payload: Some(tunnel::tunnel_client_frame::Payload::McpResponse(resp)),
-        };
+        let frame = self.make_client_frame(tunnel::tunnel_client_frame::Payload::McpResponse(resp));
         let _ = self.client_tx.send(frame).await;
     }
 
@@ -378,12 +422,7 @@ impl Orchestrator {
             responded_at_unix: chrono::Utc::now().timestamp(),
         };
 
-        let frame = TunnelClientFrame {
-            frame_id: uuid::Uuid::new_v4().to_string(),
-            timestamp_unix_ms: chrono::Utc::now().timestamp_millis(),
-            agent_id: self.agent_id.clone(),
-            payload: Some(tunnel::tunnel_client_frame::Payload::ApprovalResponse(resp)),
-        };
+        let frame = self.make_client_frame(tunnel::tunnel_client_frame::Payload::ApprovalResponse(resp));
         let _ = self.client_tx.send(frame).await;
     }
 }

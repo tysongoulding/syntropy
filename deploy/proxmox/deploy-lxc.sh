@@ -76,8 +76,51 @@ pct exec "${CT_ID}" -- bash -c "
 
     apt-get update && apt-get install -y docker-ce docker-ce-cli containerd.io docker-compose-plugin
 
-    # Clone and deploy Syntropy
+    # Deploy Syntropy Cloud services
     mkdir -p /opt/syntropy
+    cat << 'EOF' > /opt/syntropy/docker-compose.yml
+services:
+  gateway:
+    image: ghcr.io/tysongoulding/syntropy-cloud:latest
+    container_name: syntropy-gateway
+    restart: always
+    ports:
+      - "50051:50051"
+    command: ["syntropy-gateway", "--bind", "0.0.0.0:50051"]
+    environment:
+      - RUST_LOG=info
+  orchestrator:
+    image: ghcr.io/tysongoulding/syntropy-cloud:latest
+    container_name: syntropy-orchestrator
+    restart: always
+    command: ["syntropy-orchestrator", "--sprint-id", "sprint-default", "--objective", "Continuous Swarm"]
+    environment:
+      - RUST_LOG=info
+    depends_on:
+      - gateway
+EOF
+
+    # Create systemd service for auto-start
+    cat << 'EOF' > /etc/systemd/system/syntropy-cloud.service
+[Unit]
+Description=Syntropy Cloud Docker Compose Stack
+After=docker.service
+Requires=docker.service
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+WorkingDirectory=/opt/syntropy
+ExecStart=/usr/bin/docker compose up -d
+ExecStop=/usr/bin/docker compose down
+
+[Install]
+WantedBy=multi-user.target
+EOF
+
+    systemctl daemon-reload
+    systemctl enable syntropy-cloud
+    systemctl start syntropy-cloud || true
 "
 
 # 5. Retrieve container IP

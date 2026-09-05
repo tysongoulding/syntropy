@@ -19,7 +19,7 @@ echo "=========================================================="
 # 1. Build container image using Cloud Build
 echo "📦 Building container image..."
 gcloud builds submit --project="${PROJECT_ID}" \
-    --config=deploy/docker/Dockerfile.cloud \
+    --file=deploy/docker/Dockerfile.cloud \
     --tag="${IMAGE_NAME}" .
 
 # 2. Deploy to Cloud Run with native HTTP/2 for gRPC streaming
