@@ -343,11 +343,11 @@ mod tests {
 
         // None defaults to root
         let default_cwd = jail.validate_cwd(None).unwrap();
-        assert_eq!(default_cwd, jail.canonical_root());
+        assert_eq!(default_cwd, normalize_path_prefix(jail.canonical_root()));
 
         // Valid sub dir
         let valid_cwd = jail.validate_cwd(Some(&sub_dir)).unwrap();
-        assert_eq!(valid_cwd, fs::canonicalize(&sub_dir).unwrap());
+        assert_eq!(valid_cwd, normalize_path_prefix(&fs::canonicalize(&sub_dir).unwrap()));
 
         // File as cwd must fail
         let file_path = temp_dir.join("file.txt");

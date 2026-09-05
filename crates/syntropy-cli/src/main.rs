@@ -47,8 +47,8 @@ enum Commands {
         #[arg(long, default_value = "false")]
         dev: bool,
 
-        /// Model identifier (defaults to gemini-2.5-flash)
-        #[arg(short, long, default_value = "gemini-2.5-flash")]
+        /// Model identifier (defaults to gemini-flash-latest)
+        #[arg(short, long, default_value = "gemini-flash-latest")]
         model: String,
 
         /// Explicit API key override (defaults to hardware keystore or GEMINI_API_KEY)
@@ -258,12 +258,21 @@ async fn main() -> Result<(), anyhow::Error> {
                     if let Some(payload) = frame.payload {
                         match payload {
                             tunnel::tunnel_server_frame::Payload::ExecCommand(cmd) => {
-                                println!("\n▶️ [Virtual PTY] Executing: {} {:?}", cmd.command, cmd.args);
+                                #[cfg(windows)]
+                                let (final_command, final_args) = if cmd.command == "ls" {
+                                    ("cmd.exe".to_string(), vec!["/c".to_string(), "dir".to_string()])
+                                } else {
+                                    (cmd.command.clone(), cmd.args.clone())
+                                };
+                                #[cfg(not(windows))]
+                                let (final_command, final_args) = (cmd.command.clone(), cmd.args.clone());
+
+                                println!("\n▶️ [Virtual PTY] Executing: {} {:?}", final_command, final_args);
                                 let cwd_path = if cmd.working_dir.is_empty() { None } else { Some(std::path::Path::new(&cmd.working_dir)) };
                                 let target_cwd = jail.validate_cwd(cwd_path)?;
 
-                                let mut spawn_opts = SpawnOptions::new(&cmd.command)
-                                    .args(cmd.args)
+                                let mut spawn_opts = SpawnOptions::new(&final_command)
+                                    .args(final_args)
                                     .cwd(target_cwd)
                                     .pty(cmd.pty);
                                 if cmd.pty && cmd.pty_rows > 0 && cmd.pty_cols > 0 {

@@ -39,11 +39,18 @@ impl AgentTurnEngine {
             "Processing user prompt through Gemini Turn Engine"
         );
 
+        let host_platform = if cfg!(windows) {
+            "Windows (use cmd.exe /c or powershell.exe for builtins like dir, or native binaries like cargo, git)"
+        } else {
+            "Unix / Linux (sh, bash, ls, git, cargo)"
+        };
+
         let system_directive = format!(
             "You are an autonomous engineering agent connected to host workspace via Syntropy.\n\
+             Host Operating System: {host_platform}\n\
              Agent ID: {agent_id}\n\
              You have access to tools: 'exec_command' (run commands inside the canonical virtual PTY sandbox) and 'apply_patch' (apply atomic diffs).\n\
-             When asked to run commands, inspect files, or mutate code, invoke the corresponding tool."
+             Always formulate valid executable commands for the host operating system."
         );
 
         let result: GeminiTurnResult = self

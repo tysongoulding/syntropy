@@ -16,7 +16,7 @@ impl Default for GeminiConfig {
     fn default() -> Self {
         Self {
             api_key: String::new(),
-            model: "gemini-2.5-flash".into(),
+            model: "gemini-flash-latest".into(),
             endpoint: "https://generativelanguage.googleapis.com/v1beta/models".into(),
             is_dev_mock: false,
         }
@@ -74,7 +74,7 @@ impl GeminiClient {
         Self {
             config: GeminiConfig {
                 api_key: "dev_mock_key".into(),
-                model: "gemini-2.5-flash-dev-mock".into(),
+                model: "gemini-flash-latest-dev-mock".into(),
                 is_dev_mock: true,
                 ..Default::default()
             },
@@ -87,7 +87,7 @@ impl GeminiClient {
         match std::env::var("GEMINI_API_KEY") {
             Ok(key) if !key.trim().is_empty() => {
                 info!("GeminiClient: using API key from GEMINI_API_KEY environment variable");
-                Self::new(key, "gemini-2.5-flash")
+                Self::new(key, "gemini-flash-latest")
             }
             _ => {
                 info!("GeminiClient: no GEMINI_API_KEY found, initializing in offline Dev Mock mode");
