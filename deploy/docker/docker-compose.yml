@@ -1,0 +1,33 @@
+version: '3.8'
+
+services:
+  gateway:
+    build:
+      context: ../..
+      dockerfile: deploy/docker/Dockerfile.cloud
+    image: syntropy-cloud:latest
+    container_name: syntropy-gateway
+    restart: always
+    command: ["syntropy-gateway", "--bind", "0.0.0.0:50051"]
+    ports:
+      - "50051:50051"
+    environment:
+      - RUST_LOG=info
+    healthcheck:
+      test: ["CMD-SHELL", "curl -f http://127.0.0.1:50051 || true"]
+      interval: 10s
+      timeout: 5s
+      retries: 3
+
+  orchestrator:
+    build:
+      context: ../..
+      dockerfile: deploy/docker/Dockerfile.cloud
+    image: syntropy-cloud:latest
+    container_name: syntropy-orchestrator
+    restart: always
+    command: ["syntropy-orchestrator", "--sprint-id", "sprint-default", "--objective", "Continuous Orchestration"]
+    environment:
+      - RUST_LOG=info
+    depends_on:
+      - gateway

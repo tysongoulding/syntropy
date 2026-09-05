@@ -1,0 +1,50 @@
+# Google Cloud Deployment Manager (GCP equivalent to AWS CloudFormation)
+# Deploy with: gcloud deployment-manager deployments create syntropy-cloud --config deployment-manager.yaml
+
+resources:
+- name: syntropy-network
+  type: compute.v1.network
+  properties:
+    autoCreateSubnetworks: true
+
+- name: syntropy-firewall-grpc
+  type: compute.v1.firewall
+  properties:
+    network: $(ref.syntropy-network.selfLink)
+    sourceRanges: ["0.0.0.0/0"]
+    allowed:
+    - IPProtocol: tcp
+      ports: ["50051"]
+    targetTags: ["syntropy-gateway"]
+
+- name: syntropy-gateway-vm
+  type: compute.v1.instance
+  properties:
+    zone: us-central1-a
+    machineType: zones/us-central1-a/machineTypes/e2-medium
+    tags:
+      items: ["syntropy-gateway"]
+    disks:
+    - deviceName: boot
+      type: PERSISTENT
+      boot: true
+      autoDelete: true
+      initializeParams:
+        sourceImage: projects/cos-cloud/global/images/family/cos-stable
+    networkInterfaces:
+    - network: $(ref.syntropy-network.selfLink)
+      accessConfigs:
+      - name: External NAT
+        type: ONE_TO_ONE_NAT
+    metadata:
+      items:
+      - key: gce-container-declaration
+        value: |
+          spec:
+            containers:
+              - name: syntropy-gateway
+                image: gcr.io/google-containers/busybox
+                command: ["sh", "-c", "echo Starting Syntropy Gateway; while true; do sleep 3600; done"]
+                stdin: false
+                tty: false
+            restartPolicy: Always

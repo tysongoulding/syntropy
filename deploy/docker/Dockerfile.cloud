@@ -1,0 +1,40 @@
+# syntax=docker/dockerfile:1
+FROM rust:1.80-slim-bullseye AS builder
+
+WORKDIR /usr/src/syntropy
+
+# Install build dependencies (protobuf, pkg-config, make, libssl-dev)
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    protobuf-compiler \
+    pkg-config \
+    libssl-dev \
+    build-essential \
+    && rm -rf /var/lib/apt/lists/*
+
+# Copy workspace files
+COPY Cargo.toml Cargo.lock .syntropy.toml ./
+COPY crates/ crates/
+COPY services/ services/
+
+# Compile release binaries for gateway and orchestrator
+RUN cargo build --release -p syntropy-gateway -p syntropy-orchestrator
+
+# Runtime container
+FROM debian:bullseye-slim
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    ca-certificates \
+    libssl1.1 \
+    curl \
+    && rm -rf /var/lib/apt/lists/*
+
+WORKDIR /app
+
+COPY --from=builder /usr/src/syntropy/target/release/syntropy-gateway /usr/local/bin/syntropy-gateway
+COPY --from=builder /usr/src/syntropy/target/release/syntropy-orchestrator /usr/local/bin/syntropy-orchestrator
+
+ENV RUST_LOG=info
+EXPOSE 50051
+
+ENTRYPOINT ["syntropy-gateway"]
+CMD ["--bind", "0.0.0.0:50051"]
