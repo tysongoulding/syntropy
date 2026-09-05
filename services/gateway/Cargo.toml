@@ -24,3 +24,9 @@ tracing-subscriber = { workspace = true }
 uuid = { workspace = true }
 chrono = { workspace = true }
 clap = { workspace = true }
+
+[dev-dependencies]
+syntropy-tunnel = { workspace = true }
+syntropy-daemon = { workspace = true }
+syntropy-exec = { workspace = true }
+syntropy-security = { workspace = true }

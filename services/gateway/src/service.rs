@@ -37,6 +37,12 @@ impl AgentTunnelService for GatewayTunnelService {
         &self,
         request: Request<Streaming<TunnelClientFrame>>,
     ) -> Result<Response<Self::OpenTunnelStream>, Status> {
+        let metadata_agent_id = request
+            .metadata()
+            .get("x-agent-id")
+            .and_then(|v| v.to_str().ok())
+            .map(|s| s.to_string());
+
         let mut in_stream = request.into_inner();
         let (out_tx, out_rx) = mpsc::channel(512);
 
@@ -44,7 +50,10 @@ impl AgentTunnelService for GatewayTunnelService {
         let event_tx = self.client_frame_tx.clone();
 
         tokio::spawn(async move {
-            let mut current_agent_id: Option<String> = None;
+            let mut current_agent_id = metadata_agent_id;
+            if let Some(ref agent_id) = current_agent_id {
+                registry.register(agent_id.clone(), out_tx.clone()).await;
+            }
 
             while let Ok(Some(client_frame)) = in_stream.message().await {
                 let agent_id = client_frame.agent_id.clone();
