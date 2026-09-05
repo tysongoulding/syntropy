@@ -6,13 +6,13 @@ Syntropy is a local-first, cloud-orchestrated autonomous agent system. It pairs 
 
 ---
 
-## 🏗️ Architecture & Crates
+## 🏗️ Monorepo Organization
 
 ```text
 syntropy/
 ├── Cargo.toml                    # Workspace manifest
 ├── .syntropy.toml                # Project & runtime configuration
-├── crates/
+├── crates/                       # Shared Core & Application Track
 │   ├── syntropy-proto/           # Protobuf definitions & Tonic gRPC codegen
 │   ├── syntropy-tunnel/          # Outbound gRPC connection manager & MockGatewayServer
 │   ├── syntropy-exec/            # Virtual PTY mux (portable-pty), path jail, atomic diffs, worktrees
@@ -20,27 +20,42 @@ syntropy/
 │   ├── syntropy-mcp/             # MCP child-process supervisor & capability allowlist proxy
 │   ├── syntropy-daemon/          # Background daemon service & instruction orchestrator
 │   └── syntropy-cli/             # CLI binary (`syntropy dev-server`, `syntropy daemon`, `syntropy doctor`)
+└── services/                     # Cloud Track (Control Plane & Swarm Brain)
+    ├── gateway/                  # Edge ingress gateway managing agent tunnels & stream multiplexing
+    └── swarm-orchestrator/       # 4-tier swarm workflow engine, phase gates & Blackboard store
 ```
 
-### Key Subsystems
+---
 
-1. **Multiplexed Outbound Tunnel (`syntropy-proto` & `syntropy-tunnel`)**
-   - Outbound-only TLS gRPC stream via `AgentTunnelService.OpenTunnel`.
-   - Multiplexes terminal PTY streams, unified diff patches, MCP invocations, approvals, and heartbeats over a single persistent HTTP/2 connection.
-   - Zero open inbound ports required.
-   - Automatic reconnect with exponential backoff and memory buffering.
+## ☁️ Cloud Track Subsystems
 
-2. **Execution Sandboxing & PTY Multiplexing (`syntropy-exec`)**
-   - **Virtual PTY Multiplexer**: Cross-platform terminal virtualization with Windows ConPTY support via `portable-pty`. Supports concurrent agent screens (`screen_id`), bidirectional keyboard input, PTY resize, and circular in-memory ring buffers for history scrollback.
-   - **Workspace Jail**: Resolves canonical symlinks (`canonicalize`) and verifies that all target paths and CWDs stay strictly within permitted project roots.
-   - **Atomic Patch Applicator**: In-memory Unified Diff & Search/Replace block application with SHA-256 pre-verification and ACID shadow-file atomic swapping.
-   - **Worktree Manager**: Creates and manages ephemeral Git worktrees in `.syntropy/worktrees/<agent_id>` so multiple agents work simultaneously without file clobbering.
+1. **Edge Ingress Gateway (`services/gateway`)**
+   - Implements `AgentTunnelServiceServer` over Tonic gRPC.
+   - Accepts outbound connections from local daemons without requiring open inbound ports or public IPs on client workstations.
+   - `SessionRegistry`: Maps active agent connections, routing commands, patches, approvals, and terminal frames bidirectionally.
 
-3. **Security & Auditing (`syntropy-security` & `syntropy-mcp`)**
-   - **Single Host Authentication**: Authenticate once on the host. Keys are sealed in the hardware keystore (Windows DPAPI, macOS Keychain, Linux Secret Service).
-   - **Inverted Credential Broker**: Cloud agents request authenticated actions via RPC; the local daemon signs or injects tokens locally without leaking raw credentials or refresh tokens to the cloud.
-   - **Merkle Audit Ledger**: Append-only SQLite database linking every command, patch, and MCP invocation in a SHA-256 Merkle chain for non-repudiation and tamper detection.
-   - **Supervised MCP Proxy**: Supervised child-process MCP servers with JSON-RPC filtering, wildcard tool allowlists, and execution timeouts.
+2. **Swarm Orchestrator & Blackboard Store (`services/swarm-orchestrator`)**
+   - **Blackboard Store**: Content-addressed, versioned artifact repository (`blackboard://...`) with author-isolated write ACLs and SHA-256 deliverable verification.
+   - **4-Tier Persona Federation**: Standard blueprints for Sprint Planner, Systems Architect, Code Implementer, and QA Reviewer.
+   - **Sprint State Machine**: Coordinates phase transitions (`Planning` $\to$ `PhaseGate` $\to$ `Implementation` $\to$ `Review` $\to$ `Completed`), with phase-gate backtrack support upon human rejection.
+
+---
+
+## 💻 Application Track Subsystems
+
+1. **Virtual PTY Multiplexer (`crates/syntropy-exec`)**
+   - Cross-platform terminal virtualization powered by `portable-pty` with native Windows ConPTY support.
+   - Spawns independent agent screens (`screen_id`), broadcast ANSI streaming, and circular in-memory ring buffers for history scrollback.
+
+2. **Workspace Containment & Atomic Patching (`crates/syntropy-exec`)**
+   - `WorkspaceJail`: Canonical path verification (`canonicalize`) preventing traversal attacks (`../`, symlinks, junctions).
+   - `AtomicPatchApplicator`: Pre-commit content SHA-256 verification and shadow-swap ACID atomic replacements.
+   - `WorktreeManager`: Ephemeral Git worktrees (`.syntropy/worktrees/<agent_id>`) for collision-free concurrent agent builds.
+
+3. **Security & Cryptographic Audit (`crates/syntropy-security`)**
+   - **Hardware Keystore**: Native Windows DPAPI integration and encrypted software fallbacks.
+   - **Inverted Credential Broker**: Local token injection and signing so cloud agents never possess raw credentials.
+   - **Merkle Audit Ledger**: Append-only SQLite ledger with SHA-256 Merkle chain verification for non-repudiation.
 
 ---
 
@@ -50,26 +65,31 @@ syntropy/
 ```bash
 cargo test --workspace
 ```
-Runs 42 unit and integration tests across all 7 workspace crates.
+Executes all 44 unit and integration tests across both Cloud and Application tracks.
 
 ### 2. Run Closed-Loop End-to-End Testbed
 ```bash
 cargo run -p syntropy-cli -- dev-server --auto-verify
 ```
-Starts the in-process mock cloud gateway, connects the local daemon, and executes an automated end-to-end multi-agent test:
+Starts an in-process mock cloud gateway, connects the local daemon, and executes an automated end-to-end multi-agent test:
 - Concurrent PTY command dispatch across Agent 1 & Agent 2 screens.
 - Atomic file patch application.
 - MCP tool invocation.
 - Dual-channel signed approval handling.
 - Audit ledger hash verification.
 
-### 3. System Diagnostics
+### 3. Run the Cloud Gateway
 ```bash
-cargo run -p syntropy-cli -- doctor
+cargo run -p syntropy-gateway -- --bind 0.0.0.0:50051
 ```
 
-### 4. Verify Cryptographic Audit Ledger
+### 4. Run the Swarm Orchestrator
 ```bash
+cargo run -p syntropy-orchestrator -- --objective "Build auth service"
+```
+
+### 5. System Diagnostics & Audit Inspection
+```bash
+cargo run -p syntropy-cli -- doctor
 cargo run -p syntropy-cli -- audit
 ```
-Inspects `.syntropy/audit.db`, calculates the Merkle root hash, and verifies integrity across all recorded actions.

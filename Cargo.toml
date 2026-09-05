@@ -8,6 +8,8 @@ members = [
     "crates/syntropy-mcp",
     "crates/syntropy-daemon",
     "crates/syntropy-cli",
+    "services/gateway",
+    "services/swarm-orchestrator",
 ]
 
 [workspace.package]

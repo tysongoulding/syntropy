@@ -1,0 +1,26 @@
+[package]
+name = "syntropy-gateway"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+
+[[bin]]
+name = "syntropy-gateway"
+path = "src/main.rs"
+
+[dependencies]
+syntropy-proto = { workspace = true }
+tokio = { workspace = true }
+tokio-stream = { workspace = true }
+tonic = { workspace = true }
+prost = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+thiserror = { workspace = true }
+anyhow = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
+uuid = { workspace = true }
+chrono = { workspace = true }
+clap = { workspace = true }
