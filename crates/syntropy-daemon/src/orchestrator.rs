@@ -280,8 +280,8 @@ impl Orchestrator {
                     success: apply_res.success,
                     error_message: String::new(),
                     new_sha256: apply_res.new_sha256,
-                    lines_added: apply_res.lines_added as u32,
-                    lines_removed: apply_res.lines_removed as u32,
+                    lines_added: apply_res.lines_added,
+                    lines_removed: apply_res.lines_removed,
                 };
                 self.send_patch_result(res).await;
             }
