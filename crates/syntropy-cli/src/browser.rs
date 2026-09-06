@@ -105,6 +105,66 @@ async fn ensure_chrome_running(cdp_port: u16, client: &reqwest::Client) -> bool 
     false
 }
 
+async fn capture_page_screenshot(
+    ws_stream: &mut tokio_tungstenite::WebSocketStream<
+        tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>,
+    >,
+    req_id: i64,
+) -> Option<String> {
+    let ss_req = json!({
+        "id": req_id,
+        "method": "Page.captureScreenshot",
+        "params": { "format": "jpeg", "quality": 75 }
+    });
+    if ws_stream.send(Message::Text(ss_req.to_string().into())).await.is_err() {
+        return None;
+    }
+    let read_timeout = tokio::time::Instant::now() + Duration::from_secs(3);
+    while tokio::time::Instant::now() < read_timeout {
+        if let Ok(Some(Ok(Message::Text(txt)))) =
+            tokio::time::timeout(Duration::from_millis(500), ws_stream.next()).await
+        {
+            if let Ok(parsed) = serde_json::from_str::<Value>(&txt) {
+                if parsed["id"] == req_id {
+                    return parsed["result"]["data"].as_str().map(|s| s.to_string());
+                }
+            }
+        }
+    }
+    None
+}
+
+async fn get_page_info(
+    ws_stream: &mut tokio_tungstenite::WebSocketStream<
+        tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>,
+    >,
+    req_id: i64,
+) -> (String, String) {
+    let eval_req = json!({
+        "id": req_id,
+        "method": "Runtime.evaluate",
+        "params": {
+            "expression": "JSON.stringify({ title: document.title, url: window.location.href })"
+        }
+    });
+    if ws_stream.send(Message::Text(eval_req.to_string().into())).await.is_ok() {
+        if let Ok(Some(Ok(Message::Text(txt)))) =
+            tokio::time::timeout(Duration::from_secs(2), ws_stream.next()).await
+        {
+            if let Ok(parsed) = serde_json::from_str::<Value>(&txt) {
+                if let Some(json_str) = parsed["result"]["result"]["value"].as_str() {
+                    if let Ok(meta) = serde_json::from_str::<Value>(json_str) {
+                        let title = meta["title"].as_str().unwrap_or_default().to_string();
+                        let url = meta["url"].as_str().unwrap_or_default().to_string();
+                        return (title, url);
+                    }
+                }
+            }
+        }
+    }
+    (String::new(), String::new())
+}
+
 /// Executes a browser action against the local Chrome DevTools Protocol instance.
 pub async fn execute_browser_action(
     cdp_port: u16,
@@ -182,30 +242,7 @@ pub async fn execute_browser_action(
             // Wait briefly for navigation to process
             tokio::time::sleep(Duration::from_millis(1500)).await;
 
-            // Capture screenshot
-            let ss_req = json!({
-                "id": 2,
-                "method": "Page.captureScreenshot",
-                "params": { "format": "jpeg", "quality": 75 }
-            });
-            ws_stream.send(Message::Text(ss_req.to_string().into())).await?;
-
-            // Read response
-            let read_timeout = tokio::time::Instant::now() + Duration::from_secs(4);
-            while tokio::time::Instant::now() < read_timeout {
-                if let Ok(Some(Ok(Message::Text(txt)))) =
-                    tokio::time::timeout(Duration::from_millis(500), ws_stream.next()).await
-                {
-                    if let Ok(parsed) = serde_json::from_str::<Value>(&txt) {
-                        if parsed["id"] == 2 {
-                            if let Some(b64) = parsed["result"]["data"].as_str() {
-                                screenshot_base64 = Some(b64.to_string());
-                            }
-                            break;
-                        }
-                    }
-                }
-            }
+            screenshot_base64 = capture_page_screenshot(&mut ws_stream, 2).await;
 
             // Extract page title & inner text
             let eval_req = json!({
@@ -233,23 +270,11 @@ pub async fn execute_browser_action(
         }
 
         "screenshot" => {
-            let ss_req = json!({
-                "id": 10,
-                "method": "Page.captureScreenshot",
-                "params": { "format": "jpeg", "quality": 80 }
-            });
-            ws_stream.send(Message::Text(ss_req.to_string().into())).await?;
-
-            if let Ok(Some(Ok(Message::Text(txt)))) =
-                tokio::time::timeout(Duration::from_secs(3), ws_stream.next()).await
-            {
-                if let Ok(parsed) = serde_json::from_str::<Value>(&txt) {
-                    if let Some(b64) = parsed["result"]["data"].as_str() {
-                        screenshot_base64 = Some(b64.to_string());
-                    }
-                }
-            }
+            screenshot_base64 = capture_page_screenshot(&mut ws_stream, 10).await;
             page_content = "Screenshot captured successfully.".into();
+            let (t, u) = get_page_info(&mut ws_stream, 11).await;
+            if !t.is_empty() { page_title = t; }
+            if !u.is_empty() { current_url = u; }
         }
 
         "get_content" => {
@@ -272,13 +297,33 @@ pub async fn execute_browser_action(
                         .to_string();
                 }
             }
+            let (t, u) = get_page_info(&mut ws_stream, 21).await;
+            if !t.is_empty() { page_title = t; }
+            if !u.is_empty() { current_url = u; }
         }
 
         "click" => {
             let selector = action.selector.as_deref().unwrap_or("button");
             let click_expr = format!(
-                "(() => {{ const el = document.querySelector('{}'); if(el) {{ el.click(); return 'Clicked'; }} return 'Element not found'; }})()",
-                selector.replace('\'', "\\'")
+                r#"(() => {{
+                    const s = '{}';
+                    let el = null;
+                    try {{ el = document.querySelector(s); }} catch(e) {{}}
+                    if (!el) {{
+                        const all = Array.from(document.querySelectorAll('button, a, div, span, p, [role="button"], [role="listitem"], [role="link"], input'));
+                        el = all.find(e => (e.innerText && e.innerText.trim() === s) || (e.getAttribute('aria-label') && e.getAttribute('aria-label').includes(s)));
+                        if (!el) {{
+                            el = all.find(e => e.innerText && e.innerText.includes(s));
+                        }}
+                    }}
+                    if (el) {{
+                        el.scrollIntoView({{ behavior: 'instant', block: 'center' }});
+                        el.click();
+                        return 'Clicked: ' + (el.innerText ? el.innerText.trim().substring(0, 50) : (el.getAttribute('aria-label') || s));
+                    }}
+                    return 'Element not found for: ' + s;
+                }})()"#,
+                selector.replace('\\', "\\\\").replace('\'', "\\'")
             );
             let eval_req = json!({
                 "id": 30,
@@ -286,8 +331,122 @@ pub async fn execute_browser_action(
                 "params": { "expression": click_expr }
             });
             ws_stream.send(Message::Text(eval_req.to_string().into())).await?;
+            if let Ok(Some(Ok(Message::Text(txt)))) =
+                tokio::time::timeout(Duration::from_secs(2), ws_stream.next()).await
+            {
+                if let Ok(parsed) = serde_json::from_str::<Value>(&txt) {
+                    page_content = parsed["result"]["result"]["value"]
+                        .as_str()
+                        .unwrap_or("Clicked")
+                        .to_string();
+                }
+            }
             tokio::time::sleep(Duration::from_millis(500)).await;
-            page_content = format!("Clicked selector: {}", selector);
+            screenshot_base64 = capture_page_screenshot(&mut ws_stream, 31).await;
+            let (t, u) = get_page_info(&mut ws_stream, 32).await;
+            if !t.is_empty() { page_title = t; }
+            if !u.is_empty() { current_url = u; }
+        }
+
+        "type" | "fill" | "input" => {
+            let text_to_type = action.text.as_deref().unwrap_or("");
+            let selector = action.selector.as_deref().unwrap_or("");
+            let type_expr = format!(
+                r#"(() => {{
+                    const s = '{}';
+                    const txt = '{}';
+                    let el = null;
+                    if (s) {{
+                        try {{ el = document.querySelector(s); }} catch(e) {{}}
+                        if (!el) {{
+                            const all = Array.from(document.querySelectorAll('input, textarea, [contenteditable="true"], [role="combobox"], [role="textbox"], div, span'));
+                            el = all.find(e => (e.getAttribute('aria-label') && e.getAttribute('aria-label').toLowerCase().includes(s.toLowerCase())) || (e.placeholder && e.placeholder.toLowerCase().includes(s.toLowerCase())));
+                        }}
+                    }}
+                    if (!el) {{
+                        el = document.activeElement;
+                    }}
+                    if (!el || el === document.body) {{
+                        el = document.querySelector('input:not([type="hidden"]), textarea, [contenteditable="true"], [role="combobox"], [role="textbox"]');
+                    }}
+                    if (!el) return 'No input or editable element found';
+                    el.focus();
+                    if (el.tagName === 'INPUT' || el.tagName === 'TEXTAREA') {{
+                        el.value = txt;
+                        el.dispatchEvent(new Event('input', {{ bubbles: true }}));
+                        el.dispatchEvent(new Event('change', {{ bubbles: true }}));
+                    }} else if (el.isContentEditable) {{
+                        el.focus();
+                        document.execCommand('insertText', false, txt);
+                        if (!el.innerText || !el.innerText.includes(txt)) {{
+                            el.innerText = txt;
+                        }}
+                        el.dispatchEvent(new Event('input', {{ bubbles: true }}));
+                    }} else {{
+                        el.innerText = txt;
+                        el.dispatchEvent(new Event('input', {{ bubbles: true }}));
+                    }}
+                    return 'Typed: ' + txt;
+                }})()"#,
+                selector.replace('\\', "\\\\").replace('\'', "\\'"),
+                text_to_type.replace('\\', "\\\\").replace('\'', "\\'").replace('\n', "\\n").replace('\r', "")
+            );
+            let eval_req = json!({
+                "id": 50,
+                "method": "Runtime.evaluate",
+                "params": { "expression": type_expr }
+            });
+            ws_stream.send(Message::Text(eval_req.to_string().into())).await?;
+            if let Ok(Some(Ok(Message::Text(txt)))) =
+                tokio::time::timeout(Duration::from_secs(2), ws_stream.next()).await
+            {
+                if let Ok(parsed) = serde_json::from_str::<Value>(&txt) {
+                    page_content = parsed["result"]["result"]["value"]
+                        .as_str()
+                        .unwrap_or("Typed")
+                        .to_string();
+                }
+            }
+            tokio::time::sleep(Duration::from_millis(500)).await;
+            screenshot_base64 = capture_page_screenshot(&mut ws_stream, 51).await;
+            let (t, u) = get_page_info(&mut ws_stream, 52).await;
+            if !t.is_empty() { page_title = t; }
+            if !u.is_empty() { current_url = u; }
+        }
+
+        "press" | "key" => {
+            let key = action.text.as_deref().unwrap_or("Enter");
+            let press_expr = format!(
+                r#"(() => {{
+                    const key = '{}';
+                    const el = document.activeElement || document.body;
+                    el.dispatchEvent(new KeyboardEvent('keydown', {{ key, code: key, bubbles: true }}));
+                    el.dispatchEvent(new KeyboardEvent('keyup', {{ key, code: key, bubbles: true }}));
+                    return 'Pressed key: ' + key;
+                }})()"#,
+                key.replace('\\', "\\\\").replace('\'', "\\'")
+            );
+            let eval_req = json!({
+                "id": 60,
+                "method": "Runtime.evaluate",
+                "params": { "expression": press_expr }
+            });
+            ws_stream.send(Message::Text(eval_req.to_string().into())).await?;
+            if let Ok(Some(Ok(Message::Text(txt)))) =
+                tokio::time::timeout(Duration::from_secs(2), ws_stream.next()).await
+            {
+                if let Ok(parsed) = serde_json::from_str::<Value>(&txt) {
+                    page_content = parsed["result"]["result"]["value"]
+                        .as_str()
+                        .unwrap_or("Pressed")
+                        .to_string();
+                }
+            }
+            tokio::time::sleep(Duration::from_millis(500)).await;
+            screenshot_base64 = capture_page_screenshot(&mut ws_stream, 61).await;
+            let (t, u) = get_page_info(&mut ws_stream, 62).await;
+            if !t.is_empty() { page_title = t; }
+            if !u.is_empty() { current_url = u; }
         }
 
         "evaluate" => {
@@ -309,6 +468,9 @@ pub async fn execute_browser_action(
                         .to_string();
                 }
             }
+            let (t, u) = get_page_info(&mut ws_stream, 41).await;
+            if !t.is_empty() { page_title = t; }
+            if !u.is_empty() { current_url = u; }
         }
 
         _ => {

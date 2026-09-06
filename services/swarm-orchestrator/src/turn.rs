@@ -69,10 +69,10 @@ impl AgentTurnEngine {
              Host Operating System: {host_platform}\n\
              Agent ID: {agent_id}\n\
              You have access to tools:\n\
-             - 'exec_command': run commands inside the canonical virtual PTY sandbox\n\
-             - 'apply_patch': apply atomic diffs\n\
-             - 'browser_action': navigate, click, inspect, or screenshot the local Chrome browser over Chrome DevTools Protocol (CDP)\n\
-             Always formulate valid executable commands or browser actions for the host operating system."
+             - 'exec_command': run shell commands inside the virtual PTY sandbox. On Linux X11 environments, desktop automation tools like 'xdotool' (e.g. 'DISPLAY=:1 xdotool mousemove/click/type') and 'scrot' are available.\n\
+             - 'apply_patch': apply atomic diffs to files.\n\
+             - 'browser_action': control Chrome over CDP. Actions: 'navigate', 'screenshot', 'get_content', 'click' (supports CSS selector or visible text/label), 'type' (types into inputs or contenteditable fields), 'press' (keyboard events e.g. 'Enter'), 'evaluate' (JavaScript).\n\
+             Always formulate valid executable commands or browser actions."
         );
 
         let history = if !prompt.session_id.is_empty() {

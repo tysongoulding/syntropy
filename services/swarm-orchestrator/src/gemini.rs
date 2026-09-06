@@ -180,12 +180,12 @@ impl GeminiClient {
                             "properties": {
                                 "action": {
                                     "type": "string",
-                                    "enum": ["navigate", "screenshot", "get_content", "click", "evaluate"],
-                                    "description": "Action to perform: 'navigate' to load a URL, 'screenshot' to capture page image, 'get_content' to read page text, 'click' to click an element, 'evaluate' to run JS"
+                                    "enum": ["navigate", "screenshot", "get_content", "click", "type", "press", "evaluate"],
+                                    "description": "Action to perform: 'navigate' to load a URL, 'screenshot' to capture page image, 'get_content' to read page text, 'click' to click an element (supports CSS selector or text/label), 'type' to type text into an input/textarea/editable element, 'press' to simulate key press (e.g. 'Enter'), 'evaluate' to run arbitrary JS"
                                 },
                                 "url": { "type": "string", "description": "URL to navigate to (e.g. 'https://www.google.com')" },
-                                "selector": { "type": "string", "description": "CSS selector to click or query" },
-                                "text": { "type": "string", "description": "Text or JavaScript to evaluate" }
+                                "selector": { "type": "string", "description": "CSS selector or element text/label to click or type into" },
+                                "text": { "type": "string", "description": "Text to type, key to press, or JavaScript to evaluate" }
                             },
                             "required": ["action"]
                         }

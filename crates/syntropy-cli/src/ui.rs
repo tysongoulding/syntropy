@@ -411,13 +411,31 @@ async fn execute_tool_frame_locally(
     match payload {
         syntropy_proto::tunnel::tunnel_server_frame::Payload::ExecCommand(cmd) => {
             #[cfg(windows)]
-            let (final_command, final_args) = if cmd.command == "ls" {
-                ("cmd.exe".to_string(), vec!["/c".to_string(), "dir".to_string()])
-            } else {
-                (cmd.command.clone(), cmd.args.clone())
+            let (final_command, final_args) = {
+                let full_line = if cmd.args.is_empty() {
+                    cmd.command.clone()
+                } else {
+                    format!("{} {}", cmd.command, cmd.args.join(" "))
+                };
+                if full_line.contains(' ') || full_line.contains(';') || full_line.contains('&') || full_line.contains('|') || cmd.command == "ls" || cmd.command == "dir" {
+                    ("cmd.exe".to_string(), vec!["/c".to_string(), full_line])
+                } else {
+                    (cmd.command.clone(), cmd.args.clone())
+                }
             };
             #[cfg(not(windows))]
-            let (final_command, final_args) = (cmd.command.clone(), cmd.args.clone());
+            let (final_command, final_args) = {
+                let full_line = if cmd.args.is_empty() {
+                    cmd.command.clone()
+                } else {
+                    format!("{} {}", cmd.command, cmd.args.join(" "))
+                };
+                if full_line.contains(' ') || full_line.contains(';') || full_line.contains('&') || full_line.contains('|') {
+                    ("/bin/bash".to_string(), vec!["-c".to_string(), full_line])
+                } else {
+                    (cmd.command.clone(), cmd.args.clone())
+                }
+            };
 
             let cwd_path = if cmd.working_dir.is_empty() { None } else { Some(Path::new(&cmd.working_dir)) };
             let target_cwd = jail.validate_cwd(cwd_path)?;
