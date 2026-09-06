@@ -601,6 +601,19 @@
       auditModal.style.display = "none";
     }
 
+    function cleanTerminalOutput(text) {
+      if (!text) return "(no output)";
+      let clean = text
+        .replace(/\x1b\][^\x07\x1b]*(\x07|\x1b\\|\r|\n)/g, "")
+        .replace(/\x1b\[[0-9;?]*[ -/]*[@-~]/g, "")
+        .replace(/\x1b[@-Z\\-_]/g, "")
+        .replace(/[\x00-\x08\x0B\x0C\x0E-\x1F\x7F]/g, "")
+        .replace(/\r\n/g, "\n")
+        .replace(/\r/g, "\n")
+        .trim();
+      return clean ? clean.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;") : "(empty output)";
+    }
+
     // Format simple markdown into HTML
     function formatMarkdown(text) {
       if (!text) return "";
@@ -700,7 +713,7 @@
                       <span class="tool-title">📟 Virtual PTY: <code>${t.command} ${t.args.join(" ")}</code></span>
                       <span style="color: #3fb950; font-size: 0.75rem;">✓ Exit 0</span>
                     </div>
-                    <div class="tool-terminal">${t.output ? t.output.replace(/</g, "&lt;").replace(/>/g, "&gt;") : "(no output)"}</div>
+                    <div class="tool-terminal">${cleanTerminalOutput(t.output)}</div>
                   </div>
                 `;
               } else if (t.type === "apply_patch") {

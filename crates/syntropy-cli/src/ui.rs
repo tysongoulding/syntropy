@@ -131,7 +131,10 @@ async fn handle_connection(
 
     match (method, path) {
         ("GET", "/") | ("GET", "/index.html") => {
-            send_http_response(&mut stream, 200, "text/html; charset=utf-8", INDEX_HTML.as_bytes()).await?;
+            let html = std::fs::read_to_string(workspace.join("crates/syntropy-cli/ui/index.html"))
+                .or_else(|_| std::fs::read_to_string("crates/syntropy-cli/ui/index.html"))
+                .unwrap_or_else(|_| INDEX_HTML.to_string());
+            send_http_response(&mut stream, 200, "text/html; charset=utf-8", html.as_bytes()).await?;
         }
 
         ("GET", "/api/status") => {
@@ -313,7 +316,7 @@ async fn execute_turn_via_tunnel(
                     }
                     ledger.append("local-ui-agent", "exec_command", &full_output)?;
 
-                    let output_str = String::from_utf8_lossy(&full_output).to_string();
+                    let output_str = sanitize_terminal_output(&String::from_utf8_lossy(&full_output));
                     tool_executions.push(ExecutedTool {
                         tool_type: "exec_command".into(),
                         command: final_command,
@@ -462,6 +465,48 @@ async fn send_http_response(
     Ok(())
 }
 
+fn sanitize_terminal_output(input: &str) -> String {
+    let mut out = String::with_capacity(input.len());
+    let mut chars = input.chars().peekable();
+
+    while let Some(c) = chars.next() {
+        if c == '\x1b' {
+            match chars.peek() {
+                Some(&'[') => {
+                    chars.next();
+                    while let Some(&next_c) = chars.peek() {
+                        chars.next();
+                        if next_c.is_ascii_alphabetic() || next_c == '~' {
+                            break;
+                        }
+                    }
+                }
+                Some(&']') => {
+                    chars.next();
+                    while let Some(&next_c) = chars.peek() {
+                        chars.next();
+                        if next_c == '\x07' || next_c == '\n' {
+                            break;
+                        }
+                    }
+                }
+                Some(_) => {
+                    chars.next();
+                }
+                None => {}
+            }
+        } else if c == '\r' {
+            if chars.peek() == Some(&'\n') {
+                chars.next();
+                out.push('\n');
+            }
+        } else if !c.is_control() || c == '\n' || c == '\t' {
+            out.push(c);
+        }
+    }
+    out
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -525,5 +570,12 @@ mod tests {
 
         server_task.abort();
         let _ = std::fs::remove_dir_all(&temp_dir);
+    }
+
+    #[test]
+    fn test_sanitize_terminal_output() {
+        let raw = "\x1b[?9001h\x1b[?1004h\x1b[?25l\x1b[2J\x1b[m\x1b[H\x1b]0;C:\\Windows\\cmd.exe\x07\x1b[?25hCargo.toml\r\nsrc/lib.rs\x1b[?9001l";
+        let clean = sanitize_terminal_output(raw);
+        assert_eq!(clean.trim(), "Cargo.toml\nsrc/lib.rs");
     }
 }
