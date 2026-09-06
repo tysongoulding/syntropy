@@ -293,7 +293,7 @@ impl AtomicPatchApplicator {
 
         // Perform atomic rename
         let rename_res = fs::rename(&shadow_path, path);
-        if let Err(_err) = rename_res {
+        if let Err(err) = rename_res {
             #[cfg(windows)]
             {
                 // On Windows, if destination exists and is read-only, remove read-only attribute

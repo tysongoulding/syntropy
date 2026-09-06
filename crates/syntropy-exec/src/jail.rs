@@ -1,6 +1,8 @@
 //! Workspace containment jail enforcing path boundaries and preventing directory traversal attacks.
 
-use std::path::{Component, Path, PathBuf};
+use std::path::{Path, PathBuf};
+#[cfg(windows)]
+use std::path::Component;
 use thiserror::Error;
 
 /// Errors produced during jail boundary enforcement and path resolution.
