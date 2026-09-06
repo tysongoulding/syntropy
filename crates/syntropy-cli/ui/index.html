@@ -519,11 +519,11 @@
         </div>
         <div style="display: flex; align-items: center; gap: 8px;">
           <div style="display: flex; gap: 4px;">
-            <button class="btn" onclick="setDesktopScreen('http://127.0.0.1:6080/vnc.html?autoconnect=true&resize=scale')" style="padding: 4px 8px; font-size: 0.75rem;">Screen :1</button>
-            <button class="btn" onclick="setDesktopScreen('http://127.0.0.1:6081/vnc.html?autoconnect=true&resize=scale&token=screen4')" style="padding: 4px 8px; font-size: 0.75rem;">Screen :4</button>
-            <button class="btn" onclick="setDesktopScreen('http://127.0.0.1:6081/vnc.html?autoconnect=true&resize=scale&token=screen7')" style="padding: 4px 8px; font-size: 0.75rem;">Screen :7</button>
+            <button class="btn" onclick="selectScreen(6080)" style="padding: 4px 8px; font-size: 0.75rem;">Screen :1</button>
+            <button class="btn" onclick="selectScreen(6081, 'screen4')" style="padding: 4px 8px; font-size: 0.75rem;">Screen :4</button>
+            <button class="btn" onclick="selectScreen(6081, 'screen7')" style="padding: 4px 8px; font-size: 0.75rem;">Screen :7</button>
           </div>
-          <input type="text" id="kasm-url-input" value="http://127.0.0.1:6080/vnc.html?autoconnect=true&resize=scale" placeholder="noVNC URL (http://<host>:6080/vnc.html)" style="background: var(--surface-hover); border: 1px solid var(--surface-border); color: var(--text); padding: 5px 10px; border-radius: 6px; font-size: 0.8rem; width: 240px;" />
+          <input type="text" id="kasm-url-input" value="" placeholder="noVNC URL (http://<host>:6080/vnc.html)" style="background: var(--surface-hover); border: 1px solid var(--surface-border); color: var(--text); padding: 5px 10px; border-radius: 6px; font-size: 0.8rem; width: 240px;" />
           <button class="btn" id="kasm-connect-btn" style="padding: 5px 12px; font-size: 0.8rem;">Connect</button>
           <button class="btn" id="kasm-open-tab-btn" title="Open in new browser tab" style="padding: 5px 10px; font-size: 0.8rem;">↗ Tab</button>
           <button class="btn" id="kasm-fullscreen-btn" title="Toggle Fullscreen" style="padding: 5px 10px; font-size: 0.8rem;">⛶ Fullscreen</button>
@@ -577,10 +577,22 @@
     const kasmOpenTabBtn = document.getElementById("kasm-open-tab-btn");
     const kasmFullscreenBtn = document.getElementById("kasm-fullscreen-btn");
 
-    const savedKasmUrl = localStorage.getItem("syntropy_kasm_url");
-    if (savedKasmUrl) {
-      kasmUrlInput.value = savedKasmUrl;
+    function getVncUrl(port, token) {
+      const host = window.location.hostname || "127.0.0.1";
+      if (token) {
+        return `http://${host}:${port}/vnc.html?autoconnect=true&resize=scale&token=${token}`;
+      }
+      return `http://${host}:${port}/vnc.html?autoconnect=true&resize=scale`;
     }
+
+    function selectScreen(port, token) {
+      const url = getVncUrl(port, token);
+      kasmUrlInput.value = url;
+      connectKasmIframe();
+    }
+
+    const savedKasmUrl = localStorage.getItem("syntropy_kasm_url");
+    kasmUrlInput.value = savedKasmUrl || getVncUrl(6080);
 
     kasmBadge.addEventListener("click", () => {
       kasmModal.style.display = "flex";
@@ -593,13 +605,8 @@
       kasmModal.style.display = "none";
     }
 
-    function setDesktopScreen(url) {
-      kasmUrlInput.value = url;
-      connectKasmIframe();
-    }
-
     function connectKasmIframe() {
-      const url = kasmUrlInput.value.trim() || "http://127.0.0.1:6080/vnc.html?autoconnect=true&resize=scale";
+      const url = kasmUrlInput.value.trim() || getVncUrl(6080);
       localStorage.setItem("syntropy_kasm_url", url);
       kasmPlaceholder.style.display = "none";
       kasmIframe.style.display = "block";
@@ -609,7 +616,7 @@
     kasmConnectBtn.addEventListener("click", connectKasmIframe);
 
     kasmOpenTabBtn.addEventListener("click", () => {
-      const url = kasmUrlInput.value.trim() || "http://127.0.0.1:6080/vnc.html?autoconnect=true&resize=scale";
+      const url = kasmUrlInput.value.trim() || getVncUrl(6080);
       window.open(url, "_blank");
     });
 

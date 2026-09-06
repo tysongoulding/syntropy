@@ -60,6 +60,10 @@ enum Commands {
         #[arg(short, long, default_value = "3000")]
         port: u16,
 
+        /// Host address to bind (defaults to 0.0.0.0 for LAN/Proxmox VM access)
+        #[arg(long, default_value = "0.0.0.0")]
+        host: String,
+
         /// Gateway server URL (e.g. http://127.0.0.1:50051)
         #[arg(short, long)]
         server_url: Option<String>,
@@ -365,7 +369,7 @@ async fn main() -> Result<(), anyhow::Error> {
             }
         }
 
-        Commands::Ui { port, server_url, no_open } => {
+        Commands::Ui { port, host, server_url, no_open } => {
             let target_url = server_url.unwrap_or_else(|| {
                 if config.daemon.server_url.contains("gateway.syntropy.cloud") {
                     "http://127.0.0.1:50051".to_string()
@@ -373,7 +377,7 @@ async fn main() -> Result<(), anyhow::Error> {
                     config.daemon.server_url.clone()
                 }
             });
-            ui::start_ui_server(port, target_url, workspace_root, no_open).await?;
+            ui::start_ui_server(&host, port, target_url, workspace_root, no_open).await?;
         }
 
         Commands::Daemon { server_url } => {

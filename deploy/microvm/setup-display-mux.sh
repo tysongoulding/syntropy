@@ -6,22 +6,30 @@ set -euo pipefail
 
 TOKEN_DIR="/tmp/sand-novnc-tokens.d"
 LOG_DIR="/tmp/syntropy-display-logs"
-PORT_WEBSOCKIFY=6081
+PORT_PRIMARY=6080
+PORT_FORK=6081
 
 mkdir -p "${TOKEN_DIR}" "${LOG_DIR}" /tmp/.X11-unix
 chmod 1777 /tmp/.X11-unix "${TOKEN_DIR}"
 
-echo "[+] Starting token-multiplexed websockify on 0.0.0.0:${PORT_WEBSOCKIFY}..."
+echo "[+] Starting primary noVNC websockify on 0.0.0.0:${PORT_PRIMARY} (Display :1 -> 5901)..."
+websockify \
+  --web=/usr/share/novnc \
+  --heartbeat=30 \
+  "0.0.0.0:${PORT_PRIMARY}" \
+  127.0.0.1:5901 \
+  > "${LOG_DIR}/websockify_primary.log" 2>&1 &
+PID_PRIMARY=$!
+
+echo "[+] Starting token-multiplexed websockify on 0.0.0.0:${PORT_FORK} (Fork Displays)..."
 websockify \
   --web=/usr/share/novnc \
   --heartbeat=30 \
   --token-plugin TokenFile \
   --token-source "${TOKEN_DIR}" \
-  "0.0.0.0:${PORT_WEBSOCKIFY}" \
-  > "${LOG_DIR}/websockify.log" 2>&1 &
-
-WEBSOCKIFY_PID=$!
-echo "[+] websockify PID: ${WEBSOCKIFY_PID}"
+  "0.0.0.0:${PORT_FORK}" \
+  > "${LOG_DIR}/websockify_forks.log" 2>&1 &
+PID_FORK=$!
 
 spawn_agent_display() {
   local DISPLAY_NUM="$1"
@@ -68,7 +76,10 @@ spawn_agent_display() {
   echo "${AGENT_TOKEN}: 127.0.0.1:${RFB_PORT}" > "${TOKEN_DIR}/${AGENT_TOKEN}.token"
 
   echo "[✓] Display ${DISPLAY_STR} ready!"
-  echo "    Browser URL: http://<HOST_IP>:${PORT_WEBSOCKIFY}/vnc.html?token=${AGENT_TOKEN}&autoconnect=true&resize=remote"
+  if [ "${DISPLAY_NUM}" -eq 1 ]; then
+    echo "    Primary URL: http://<PROXMOX_IP>:${PORT_PRIMARY}/vnc.html?autoconnect=true&resize=remote"
+  fi
+  echo "    Fork Token URL: http://<PROXMOX_IP>:${PORT_FORK}/vnc.html?token=${AGENT_TOKEN}&autoconnect=true&resize=remote"
 }
 
 # Replicate the default screens observed on the microVM (:1, :4, :7)
@@ -77,4 +88,4 @@ spawn_agent_display 4 "agent-4"
 spawn_agent_display 7 "agent-7"
 
 echo "[✓] Multi-display environment online. Press Ctrl+C to stop."
-wait "${WEBSOCKIFY_PID}"
+wait "${PID_PRIMARY}" "${PID_FORK}"

@@ -62,32 +62,39 @@ struct AuditEntryView {
 
 /// Starts the local embedded HTTP UI server.
 pub async fn start_ui_server(
+    host: &str,
     port: u16,
     server_url: String,
     workspace_root: PathBuf,
     no_open: bool,
 ) -> Result<(), anyhow::Error> {
-    let addr = format!("127.0.0.1:{}", port);
+    let addr = format!("{}:{}", host, port);
     let listener = TcpListener::bind(&addr).await?;
     let local_addr = listener.local_addr()?;
-    let url = format!("http://{}", local_addr);
+    let display_url = if host == "0.0.0.0" {
+        format!("http://127.0.0.1:{}", local_addr.port())
+    } else {
+        format!("http://{}", local_addr)
+    };
 
-    info!("🚀 Syntropy UI server listening at {}", url);
+    info!("🚀 Syntropy UI server listening at {}:{}", host, port);
     println!("\n========================================================");
-    println!("⚡ Syntropy Swarm UI active at: {}", url);
-    println!("🔗 Connected to Cloud Gateway: {}", server_url);
-    println!("📂 Workspace root:              {:?}", workspace_root);
+    println!("⚡ Syntropy Swarm UI active at: http://{}:{}", if host == "0.0.0.0" { "0.0.0.0" } else { host }, port);
+    println!("🔗 Local Browser Access:        {}", display_url);
+    println!("🌐 Network Access (Proxmox/LAN): http://<YOUR_IP>:{}", port);
+    println!("🔗 Connected to Cloud Gateway:   {}", server_url);
+    println!("📂 Workspace root:               {:?}", workspace_root);
     println!("========================================================\n");
 
     if !no_open {
         #[cfg(windows)]
         let _ = std::process::Command::new("cmd")
-            .args(["/c", "start", &url])
+            .args(["/c", "start", &display_url])
             .spawn();
         #[cfg(target_os = "macos")]
-        let _ = std::process::Command::new("open").arg(&url).spawn();
+        let _ = std::process::Command::new("open").arg(&display_url).spawn();
         #[cfg(all(not(windows), not(target_os = "macos")))]
-        let _ = std::process::Command::new("xdg-open").arg(&url).spawn();
+        let _ = std::process::Command::new("xdg-open").arg(&display_url).spawn();
     }
 
     let shared_workspace = Arc::new(workspace_root);
