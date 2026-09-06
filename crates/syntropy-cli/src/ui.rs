@@ -150,6 +150,10 @@ async fn handle_connection(
             send_http_response(&mut stream, 200, "text/html; charset=utf-8", html.as_bytes()).await?;
         }
 
+        ("HEAD", "/") | ("HEAD", "/index.html") => {
+            send_http_response(&mut stream, 200, "text/html; charset=utf-8", &[]).await?;
+        }
+
         ("GET", "/api/status") => {
             let client = reqwest::Client::builder()
                 .danger_accept_invalid_certs(true)
