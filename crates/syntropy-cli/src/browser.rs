@@ -32,6 +32,70 @@ struct TargetInfo {
     websocket_url: Option<String>,
 }
 
+async fn ensure_chrome_running(cdp_port: u16, client: &reqwest::Client) -> bool {
+    if cdp_port != 9222 {
+        return false;
+    }
+
+    info!("Chrome not detected on port {}, attempting auto-launch...", cdp_port);
+
+    #[cfg(windows)]
+    {
+        let paths = [
+            r"C:\Program Files\Google\Chrome\Application\chrome.exe",
+            r"C:\Program Files (x86)\Google\Chrome\Application\chrome.exe",
+        ];
+        let mut spawned = false;
+        for p in &paths {
+            if std::path::Path::new(p).exists() {
+                let _ = std::process::Command::new(p)
+                    .arg(format!("--remote-debugging-port={}", cdp_port))
+                    .spawn();
+                spawned = true;
+                break;
+            }
+        }
+        if !spawned {
+            let _ = std::process::Command::new("cmd")
+                .args(["/c", "start", "chrome", &format!("--remote-debugging-port={}", cdp_port)])
+                .spawn();
+        }
+    }
+
+    #[cfg(not(windows))]
+    {
+        let display = std::env::var("DISPLAY").unwrap_or_else(|_| ":1".to_string());
+        let binaries = [
+            "/usr/local/bin/google-chrome-launcher",
+            "/usr/bin/google-chrome-stable",
+            "/usr/bin/google-chrome",
+            "/usr/bin/chromium-browser",
+            "/usr/bin/chromium",
+        ];
+        for bin in &binaries {
+            if std::path::Path::new(bin).exists() {
+                let _ = std::process::Command::new(bin)
+                    .env("DISPLAY", &display)
+                    .arg(format!("--remote-debugging-port={}", cdp_port))
+                    .arg("--disable-dev-shm-usage")
+                    .spawn();
+                break;
+            }
+        }
+    }
+
+    let version_url = format!("http://127.0.0.1:{}/json/version", cdp_port);
+    for _ in 0..30 {
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        if client.get(&version_url).send().await.is_ok() {
+            info!("Chrome auto-launched and CDP is responsive on port {}", cdp_port);
+            return true;
+        }
+    }
+
+    false
+}
+
 /// Executes a browser action against the local Chrome DevTools Protocol instance.
 pub async fn execute_browser_action(
     cdp_port: u16,
@@ -41,9 +105,9 @@ pub async fn execute_browser_action(
         .timeout(Duration::from_secs(5))
         .build()?;
 
-    // 1. Verify Chrome DevTools is reachable
+    // 1. Verify Chrome DevTools is reachable (or auto-launch)
     let version_url = format!("http://127.0.0.1:{}/json/version", cdp_port);
-    if let Err(e) = client.get(&version_url).send().await {
+    if client.get(&version_url).send().await.is_err() && !ensure_chrome_running(cdp_port, &client).await {
         return Ok(BrowserActionResult {
             success: false,
             action: action.action.clone(),
@@ -52,8 +116,8 @@ pub async fn execute_browser_action(
             content: String::new(),
             screenshot_base64: None,
             error_message: Some(format!(
-                "Chrome is not running on port {}. Launch Chrome with '--remote-debugging-port={}'. Error: {}",
-                cdp_port, cdp_port, e
+                "Chrome is not running on port {}. Launch Chrome with '--remote-debugging-port={}'.",
+                cdp_port, cdp_port
             )),
         });
     }
