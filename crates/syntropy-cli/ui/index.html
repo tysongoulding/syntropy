@@ -712,7 +712,12 @@
       })
       .catch(() => {});
 
-    let currentVncHost = localStorage.getItem("syntropy_vnc_host") || (window.location.hostname && window.location.hostname !== "127.0.0.1" && window.location.hostname !== "localhost" ? window.location.hostname : "34.106.12.222");
+    let storedHost = localStorage.getItem("syntropy_vnc_host");
+    if (!storedHost || storedHost === "127.0.0.1" || storedHost === "localhost") {
+      storedHost = "34.106.12.222";
+      localStorage.setItem("syntropy_vnc_host", storedHost);
+    }
+    let currentVncHost = storedHost;
     const vncHostInput = document.getElementById("vnc-host-input");
     if (vncHostInput) {
       vncHostInput.value = currentVncHost;
@@ -727,11 +732,14 @@
     }
 
     function getVncUrl(port, token) {
-      const host = currentVncHost || "34.106.12.222";
-      if (token) {
-        return `http://${host}:${port}/vnc.html?autoconnect=true&resize=scale&token=${token}`;
+      let host = currentVncHost || "34.106.12.222";
+      if (host === "127.0.0.1" || host === "localhost") {
+        host = "34.106.12.222";
       }
-      return `http://${host}:${port}/vnc.html?autoconnect=true&resize=scale`;
+      if (token) {
+        return `http://${host}:${port}/vnc.html?autoconnect=true&resize=remote&path=?token=${token}`;
+      }
+      return `http://${host}:${port}/vnc.html?autoconnect=true&resize=remote`;
     }
 
     function selectScreen(port, token) {
@@ -740,8 +748,12 @@
       connectKasmIframe();
     }
 
-    const savedKasmUrl = localStorage.getItem("syntropy_kasm_url");
-    kasmUrlInput.value = savedKasmUrl || getVncUrl(6080);
+    let savedKasmUrl = localStorage.getItem("syntropy_kasm_url");
+    if (!savedKasmUrl || savedKasmUrl.includes("127.0.0.1:6080") || savedKasmUrl.includes("localhost:6080")) {
+      savedKasmUrl = getVncUrl(6080);
+      localStorage.setItem("syntropy_kasm_url", savedKasmUrl);
+    }
+    kasmUrlInput.value = savedKasmUrl;
 
     kasmBadge.addEventListener("click", () => {
       kasmModal.style.display = "flex";
@@ -755,7 +767,15 @@
     }
 
     function connectKasmIframe() {
-      const url = kasmUrlInput.value.trim() || getVncUrl(6080);
+      let url = kasmUrlInput.value.trim() || getVncUrl(6080);
+      if (url.includes("127.0.0.1:6080") || url.includes("localhost:6080")) {
+        url = url.replace("127.0.0.1:6080", "34.106.12.222:6080").replace("localhost:6080", "34.106.12.222:6080");
+        kasmUrlInput.value = url;
+      }
+      if (url.includes("127.0.0.1:6081") || url.includes("localhost:6081")) {
+        url = url.replace("127.0.0.1:6081", "34.106.12.222:6081").replace("localhost:6081", "34.106.12.222:6081");
+        kasmUrlInput.value = url;
+      }
       localStorage.setItem("syntropy_kasm_url", url);
       kasmPlaceholder.style.display = "none";
       kasmIframe.style.display = "block";
@@ -831,8 +851,13 @@
             chromeBadge.style.borderColor = "var(--surface-border)";
           }
 
-          if (data.vnc_host && !localStorage.getItem("syntropy_vnc_host")) {
-            currentVncHost = data.vnc_host;
+          if (data.vnc_host) {
+            let host = data.vnc_host;
+            if (host === "127.0.0.1" || host === "localhost") {
+              host = "34.106.12.222";
+            }
+            currentVncHost = host;
+            localStorage.setItem("syntropy_vnc_host", currentVncHost);
             if (vncHostInput) vncHostInput.value = currentVncHost;
           }
 

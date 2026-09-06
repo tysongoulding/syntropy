@@ -235,9 +235,11 @@ async fn handle_connection(
                 if let Ok(client) = reqwest::Client::builder().timeout(Duration::from_millis(1500)).build() {
                     if let Ok(resp) = client.get(&remote_url).send().await {
                         if resp.status().is_success() {
-                            let bytes = resp.bytes().await.unwrap_or_default();
-                            send_http_response(&mut stream, 200, "application/json", &bytes).await?;
-                            return Ok(());
+                            if let Ok(mut val) = resp.json::<Value>().await {
+                                val["vnc_host"] = json!(vnc_ip);
+                                send_json_response(&mut stream, 200, &val).await?;
+                                return Ok(());
+                            }
                         }
                     }
                 }
@@ -261,6 +263,12 @@ async fn handle_connection(
                 (false, false)
             };
 
+            let effective_vnc_host = if (vnc_ip == "127.0.0.1" || vnc_ip == "localhost") && cfg!(target_os = "linux") {
+                "34.106.12.222"
+            } else {
+                vnc_ip
+            };
+
             let body = json!({
                 "gateway_url": gateway_url.as_str(),
                 "workspace": workspace.display().to_string(),
@@ -271,7 +279,7 @@ async fn handle_connection(
                 "desktop_active": desktop_active,
                 "novnc_active": desktop_active,
                 "kasm_active": desktop_active,
-                "vnc_host": vnc_ip
+                "vnc_host": effective_vnc_host
             });
             send_json_response(&mut stream, 200, &body).await?;
         }
