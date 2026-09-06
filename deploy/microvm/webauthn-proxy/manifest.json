@@ -1,0 +1,14 @@
+{
+  "manifest_version": 3,
+  "name": "Syntropy WebAuthn Inverted Proxy",
+  "version": "0.1.0",
+  "description": "Intercepts WebAuthn ceremonies in headless Chrome and brokers credentials via local client tunnel",
+  "background": {
+    "service_worker": "background.js"
+  },
+  "permissions": [
+    "webAuthenticationProxy",
+    "nativeMessaging",
+    "tabs"
+  ]
+}
