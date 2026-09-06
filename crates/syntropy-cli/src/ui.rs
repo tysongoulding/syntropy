@@ -150,11 +150,12 @@ async fn handle_connection(
                 .build()
                 .ok();
 
-            let (chrome_attached, kasm_active) = if let Some(ref c) = client {
+            let (chrome_attached, desktop_active) = if let Some(ref c) = client {
                 let chrome = c.get("http://127.0.0.1:9222/json/version").send().await.is_ok();
-                let kasm = c.get("https://127.0.0.1:8444").send().await.is_ok()
+                let novnc = c.get("http://127.0.0.1:6080").send().await.is_ok()
+                    || c.get("http://127.0.0.1:6081").send().await.is_ok()
                     || c.get("http://127.0.0.1:8444").send().await.is_ok();
-                (chrome, kasm)
+                (chrome, novnc)
             } else {
                 (false, false)
             };
@@ -166,7 +167,9 @@ async fn handle_connection(
                 "arch": std::env::consts::ARCH,
                 "status": "online",
                 "chrome_attached": chrome_attached,
-                "kasm_active": kasm_active
+                "desktop_active": desktop_active,
+                "novnc_active": desktop_active,
+                "kasm_active": desktop_active
             });
             send_json_response(&mut stream, 200, &body).await?;
         }
