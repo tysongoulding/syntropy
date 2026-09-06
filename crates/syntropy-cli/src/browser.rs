@@ -372,27 +372,37 @@ pub async fn execute_browser_action(
                         }}
                     }}
                     if (!el) {{
+                        el = document.querySelector('textarea.input') || document.querySelector('div.input') || document.querySelector('[contenteditable="true"]') || document.querySelector('[role="textbox"]') || document.querySelector('textarea') || document.querySelector('input:not([type="hidden"])');
+                    }}
+                    if (!el) {{
                         el = document.activeElement;
                     }}
                     if (!el || el === document.body) {{
-                        el = document.querySelector('input:not([type="hidden"]), textarea, [contenteditable="true"], [role="combobox"], [role="textbox"]');
+                        return 'No input or editable element found';
                     }}
-                    if (!el) return 'No input or editable element found';
+
                     el.focus();
-                    if (el.tagName === 'INPUT' || el.tagName === 'TEXTAREA') {{
-                        el.value = txt;
-                        el.dispatchEvent(new Event('input', {{ bubbles: true }}));
-                        el.dispatchEvent(new Event('change', {{ bubbles: true }}));
-                    }} else if (el.isContentEditable) {{
-                        el.focus();
+                    const ta = document.querySelector('textarea.input') || (el.tagName === 'TEXTAREA' ? el : null);
+                    const div = document.querySelector('div.input') || (el.isContentEditable ? el : null);
+
+                    if (div) {{
+                        div.focus();
                         document.execCommand('insertText', false, txt);
-                        if (!el.innerText || !el.innerText.includes(txt)) {{
+                        div.dispatchEvent(new Event('input', {{ bubbles: true }}));
+                    }}
+                    if (ta) {{
+                        ta.value = txt;
+                        ta.dispatchEvent(new Event('input', {{ bubbles: true }}));
+                        ta.dispatchEvent(new Event('change', {{ bubbles: true }}));
+                    }} else if (!div) {{
+                        if (el.tagName === 'INPUT' || el.tagName === 'TEXTAREA') {{
+                            el.value = txt;
+                            el.dispatchEvent(new Event('input', {{ bubbles: true }}));
+                            el.dispatchEvent(new Event('change', {{ bubbles: true }}));
+                        }} else {{
                             el.innerText = txt;
+                            el.dispatchEvent(new Event('input', {{ bubbles: true }}));
                         }}
-                        el.dispatchEvent(new Event('input', {{ bubbles: true }}));
-                    }} else {{
-                        el.innerText = txt;
-                        el.dispatchEvent(new Event('input', {{ bubbles: true }}));
                     }}
                     return 'Typed: ' + txt;
                 }})()"#,
