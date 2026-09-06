@@ -16,7 +16,7 @@ impl Default for GeminiConfig {
     fn default() -> Self {
         Self {
             api_key: String::new(),
-            model: "gemini-flash-latest".into(),
+            model: "gemini-3.8-flash".into(),
             endpoint: "https://generativelanguage.googleapis.com/v1beta/models".into(),
             is_dev_mock: false,
         }
@@ -84,7 +84,7 @@ impl GeminiClient {
 
     /// Create client from `GEMINI_API_KEY` environment variable, falling back to Dev Mock if absent.
     pub fn from_env() -> Self {
-        let model = std::env::var("GEMINI_MODEL").unwrap_or_else(|_| "gemini-1.5-flash".to_string());
+        let model = std::env::var("GEMINI_MODEL").unwrap_or_else(|_| "gemini-3.8-flash".to_string());
         match std::env::var("GEMINI_API_KEY") {
             Ok(key) if !key.trim().is_empty() => {
                 info!("GeminiClient: using API key from GEMINI_API_KEY environment variable (model: {})", model);
@@ -100,7 +100,7 @@ impl GeminiClient {
     /// Create client with an explicit API key and optional model override.
     pub fn with_api_key(key: impl Into<String>, model: Option<String>) -> Self {
         let m = model.unwrap_or_else(|| {
-            std::env::var("GEMINI_MODEL").unwrap_or_else(|_| "gemini-1.5-flash".to_string())
+            std::env::var("GEMINI_MODEL").unwrap_or_else(|_| "gemini-3.8-flash".to_string())
         });
         Self::new(key, m)
     }

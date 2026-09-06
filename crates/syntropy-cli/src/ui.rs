@@ -21,6 +21,8 @@ struct ChatRequest {
     session_id: String,
     #[serde(default)]
     api_key: Option<String>,
+    #[serde(default)]
+    model: Option<String>,
 }
 
 #[derive(Debug, Serialize)]
@@ -357,7 +359,7 @@ async fn execute_turn_via_tunnel(
             info!("Cloud Gateway offline at {}, evaluating prompt directly with Gemini Turn Engine", gateway_url);
             let gemini = if let Some(ref key) = req.api_key {
                 if !key.trim().is_empty() {
-                    syntropy_orchestrator::GeminiClient::with_api_key(key.trim(), None)
+                    syntropy_orchestrator::GeminiClient::with_api_key(key.trim(), req.model.clone())
                 } else {
                     syntropy_orchestrator::GeminiClient::from_env()
                 }

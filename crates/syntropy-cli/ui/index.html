@@ -573,9 +573,13 @@
         <p style="font-size: 0.85rem; color: var(--text-muted); margin-bottom: 14px; line-height: 1.5;">
           Connect your Google AI Studio Gemini API key to enable live reasoning, command generation, and tool execution. Your key is stored securely in your browser's <code style="color:var(--primary);">localStorage</code>.
         </p>
-        <div style="display: flex; flex-direction: column; gap: 8px; margin-bottom: 16px;">
+        <div style="display: flex; flex-direction: column; gap: 8px; margin-bottom: 12px;">
           <label style="font-size: 0.72rem; color: var(--text-muted); text-transform: uppercase; font-weight: 600; letter-spacing: 0.5px;">API Key (AIzaSy...)</label>
           <input type="password" id="gemini-key-input" placeholder="AIzaSy..." style="background: var(--surface-hover); border: 1px solid var(--surface-border); color: var(--text); padding: 9px 12px; border-radius: 6px; font-size: 0.85rem; width: 100%; outline: none;" />
+        </div>
+        <div style="display: flex; flex-direction: column; gap: 8px; margin-bottom: 16px;">
+          <label style="font-size: 0.72rem; color: var(--text-muted); text-transform: uppercase; font-weight: 600; letter-spacing: 0.5px;">Gemini Model</label>
+          <input type="text" id="gemini-model-input" value="gemini-3.8-flash" placeholder="gemini-3.8-flash" style="background: var(--surface-hover); border: 1px solid var(--surface-border); color: var(--text); padding: 9px 12px; border-radius: 6px; font-size: 0.85rem; width: 100%; outline: none;" />
         </div>
         <div style="display: flex; justify-content: space-between; align-items: center;">
           <button class="btn" onclick="clearApiKey()" style="color: var(--danger); border-color: rgba(248,81,73,0.3);">Clear Key</button>
@@ -619,12 +623,15 @@
     const aiKeyLabel = document.getElementById("ai-key-label");
     const aiKeyModal = document.getElementById("ai-key-modal");
     const geminiKeyInput = document.getElementById("gemini-key-input");
+    const geminiModelInput = document.getElementById("gemini-model-input");
     const keyStatusMsg = document.getElementById("key-status-msg");
 
     function updateKeyBadgeUI() {
       const savedKey = localStorage.getItem("syntropy_gemini_api_key");
+      const savedModel = localStorage.getItem("syntropy_gemini_model") || "gemini-3.8-flash";
+      if (geminiModelInput) geminiModelInput.value = savedModel;
       if (savedKey && savedKey.trim().length > 0) {
-        aiKeyLabel.innerText = "Gemini: Active ✓";
+        aiKeyLabel.innerText = `${savedModel} ✓`;
         aiKeyBadge.style.borderColor = "#3fb950";
         if (geminiKeyInput) geminiKeyInput.value = savedKey;
       } else {
@@ -638,9 +645,13 @@
       aiKeyBadge.addEventListener("click", () => {
         aiKeyModal.style.display = "flex";
         const savedKey = localStorage.getItem("syntropy_gemini_api_key");
+        const savedModel = localStorage.getItem("syntropy_gemini_model") || "gemini-3.8-flash";
         if (geminiKeyInput) {
           geminiKeyInput.value = savedKey || "";
           geminiKeyInput.focus();
+        }
+        if (geminiModelInput) {
+          geminiModelInput.value = savedModel;
         }
         if (keyStatusMsg) keyStatusMsg.innerText = "";
       });
@@ -652,11 +663,13 @@
 
     function saveApiKey() {
       const val = geminiKeyInput ? geminiKeyInput.value.trim() : "";
+      const modelVal = geminiModelInput ? (geminiModelInput.value.trim() || "gemini-3.8-flash") : "gemini-3.8-flash";
+      localStorage.setItem("syntropy_gemini_model", modelVal);
       if (val) {
         localStorage.setItem("syntropy_gemini_api_key", val);
         if (keyStatusMsg) {
           keyStatusMsg.style.color = "#3fb950";
-          keyStatusMsg.innerText = "✓ Key saved successfully!";
+          keyStatusMsg.innerText = `✓ Model ${modelVal} & key saved!`;
         }
         setTimeout(() => closeKeyModal(), 600);
       } else {
@@ -963,7 +976,8 @@
 
       try {
         const apiKey = localStorage.getItem("syntropy_gemini_api_key");
-        const reqPayload = { text, session_id: sessionId };
+        const model = localStorage.getItem("syntropy_gemini_model") || "gemini-3.8-flash";
+        const reqPayload = { text, session_id: sessionId, model };
         if (apiKey && apiKey.trim()) {
           reqPayload.api_key = apiKey.trim();
         }
