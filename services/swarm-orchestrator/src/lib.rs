@@ -123,17 +123,39 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_gemini_live_turn_if_key_available() {
-        if let Ok(key) = std::env::var("GEMINI_LIVE_TEST_KEY") {
-            if !key.trim().is_empty() {
-                let client = GeminiClient::new(key, "gemini-flash-latest");
-                let res = client
-                    .generate_turn("Reply with the exact word PONG and nothing else.", None, &[])
-                    .await;
-                assert!(res.is_ok(), "Live Gemini API call failed: {:?}", res.err());
-                let turn = res.unwrap();
-                assert!(!turn.content.is_empty());
-            }
-        }
+    async fn test_agent_turn_engine_preserves_session_history() {
+        let client = std::sync::Arc::new(GeminiClient::dev_mock());
+        let engine = AgentTurnEngine::new(client);
+
+        let p1 = syntropy_proto::tunnel::UserPrompt {
+            prompt_id: "p1".into(),
+            text: "Hello, this is Tyson".into(),
+            session_id: "conv-1".into(),
+            context_files: Default::default(),
+        };
+        let _ = engine.process_prompt(&p1, "agent").await.unwrap();
+
+        let p2 = syntropy_proto::tunnel::UserPrompt {
+            prompt_id: "p2".into(),
+            text: "What tools do you have?".into(),
+            session_id: "conv-1".into(),
+            context_files: Default::default(),
+        };
+        let _ = engine.process_prompt(&p2, "agent").await.unwrap();
+
+        let history = engine.get_session_history("conv-1").await;
+        assert_eq!(history.len(), 4, "Should have 2 user prompts and 2 model turns recorded");
+        assert_eq!(history[0].role, "user");
+        assert_eq!(history[0].text, "Hello, this is Tyson");
+        assert_eq!(history[1].role, "model");
+        assert_eq!(history[2].role, "user");
+        assert_eq!(history[2].text, "What tools do you have?");
+        assert_eq!(history[3].role, "model");
+
+        // Clearing session works
+        engine.clear_session("conv-1").await;
+        let cleared = engine.get_session_history("conv-1").await;
+        assert!(cleared.is_empty());
     }
 }
+

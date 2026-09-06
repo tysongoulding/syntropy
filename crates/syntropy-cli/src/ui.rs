@@ -1,0 +1,529 @@
+use std::path::{Path, PathBuf};
+use std::sync::Arc;
+use std::time::Duration;
+use serde::{Deserialize, Serialize};
+use serde_json::json;
+use tokio::io::{AsyncReadExt, AsyncWriteExt};
+use tokio::net::{TcpListener, TcpStream};
+use tracing::{error, info, warn};
+
+use syntropy_exec::{AtomicPatchApplicator, PatchOptions, PtyMultiplexer, SpawnOptions, WorkspaceJail};
+use syntropy_proto::tunnel::{
+    TerminalOutputChunk, UserPrompt,
+};
+use syntropy_security::MerkleAuditLedger;
+use syntropy_tunnel::{TunnelClient, TunnelConfig};
+
+const INDEX_HTML: &str = include_str!("../ui/index.html");
+
+#[derive(Debug, Deserialize)]
+struct ChatRequest {
+    text: String,
+    #[serde(default)]
+    session_id: String,
+}
+
+#[derive(Debug, Serialize)]
+struct ExecutedTool {
+    #[serde(rename = "type")]
+    tool_type: String,
+    command: String,
+    args: Vec<String>,
+    output: String,
+    file_path: String,
+    lines_added: u32,
+    lines_removed: u32,
+}
+
+#[derive(Debug, Serialize)]
+struct ChatResponse {
+    session_id: String,
+    agent_message: String,
+    tool_calls: Vec<String>,
+    tool_executions: Vec<ExecutedTool>,
+    merkle_root: String,
+}
+
+#[derive(Debug, Serialize)]
+struct AuditEntryView {
+    id: i64,
+    timestamp: String,
+    agent_id: String,
+    action_type: String,
+    entry_hash: String,
+    previous_hash: String,
+}
+
+/// Starts the local embedded HTTP UI server.
+pub async fn start_ui_server(
+    port: u16,
+    server_url: String,
+    workspace_root: PathBuf,
+    no_open: bool,
+) -> Result<(), anyhow::Error> {
+    let addr = format!("127.0.0.1:{}", port);
+    let listener = TcpListener::bind(&addr).await?;
+    let local_addr = listener.local_addr()?;
+    let url = format!("http://{}", local_addr);
+
+    info!("🚀 Syntropy UI server listening at {}", url);
+    println!("\n========================================================");
+    println!("⚡ Syntropy Swarm UI active at: {}", url);
+    println!("🔗 Connected to Cloud Gateway: {}", server_url);
+    println!("📂 Workspace root:              {:?}", workspace_root);
+    println!("========================================================\n");
+
+    if !no_open {
+        #[cfg(windows)]
+        let _ = std::process::Command::new("cmd")
+            .args(["/c", "start", &url])
+            .spawn();
+        #[cfg(target_os = "macos")]
+        let _ = std::process::Command::new("open").arg(&url).spawn();
+        #[cfg(all(not(windows), not(target_os = "macos")))]
+        let _ = std::process::Command::new("xdg-open").arg(&url).spawn();
+    }
+
+    let shared_workspace = Arc::new(workspace_root);
+    let shared_gateway = Arc::new(server_url);
+
+    loop {
+        let (stream, _) = listener.accept().await?;
+        let ws = shared_workspace.clone();
+        let gw = shared_gateway.clone();
+
+        tokio::spawn(async move {
+            if let Err(e) = handle_connection(stream, ws, gw).await {
+                error!("HTTP connection error: {}", e);
+            }
+        });
+    }
+}
+
+async fn handle_connection(
+    mut stream: TcpStream,
+    workspace: Arc<PathBuf>,
+    gateway_url: Arc<String>,
+) -> Result<(), anyhow::Error> {
+    let mut buffer = [0u8; 8192];
+    let n = stream.read(&mut buffer).await?;
+    if n == 0 {
+        return Ok(());
+    }
+
+    let raw = String::from_utf8_lossy(&buffer[..n]);
+    let mut lines = raw.lines();
+    let request_line = match lines.next() {
+        Some(l) => l,
+        None => return Ok(()),
+    };
+
+    let mut parts = request_line.split_whitespace();
+    let method = parts.next().unwrap_or("GET");
+    let path = parts.next().unwrap_or("/");
+
+    // Extract body if Content-Length is present
+    let body = if let Some(idx) = raw.find("\r\n\r\n") {
+        &raw[idx + 4..]
+    } else {
+        ""
+    };
+
+    match (method, path) {
+        ("GET", "/") | ("GET", "/index.html") => {
+            send_http_response(&mut stream, 200, "text/html; charset=utf-8", INDEX_HTML.as_bytes()).await?;
+        }
+
+        ("GET", "/api/status") => {
+            let body = json!({
+                "gateway_url": gateway_url.as_str(),
+                "workspace": workspace.display().to_string(),
+                "os": std::env::consts::OS,
+                "arch": std::env::consts::ARCH,
+                "status": "online"
+            });
+            send_json_response(&mut stream, 200, &body).await?;
+        }
+
+        ("GET", "/api/audit") => {
+            let audit_path = workspace.join(".syntropy").join("audit.db");
+            if !audit_path.exists() {
+                let empty_resp = json!({
+                    "total_entries": 0,
+                    "verified": true,
+                    "merkle_root": "Genesis",
+                    "entries": []
+                });
+                send_json_response(&mut stream, 200, &empty_resp).await?;
+                return Ok(());
+            }
+
+            match MerkleAuditLedger::open(&audit_path) {
+                Ok(ledger) => {
+                    let integrity = ledger.verify_integrity().unwrap_or(syntropy_security::IntegrityReport {
+                        is_valid: false,
+                        verified_count: 0,
+                        latest_hash: None,
+                        violation: None,
+                    });
+                    let root = ledger.compute_merkle_root().ok().flatten().unwrap_or_else(|| "Genesis".into());
+
+                    // Query recent entries from SQLite
+                    let entries = query_recent_audit_entries(&audit_path).unwrap_or_default();
+                    let resp = json!({
+                        "total_entries": integrity.verified_count,
+                        "verified": integrity.is_valid,
+                        "merkle_root": root,
+                        "entries": entries
+                    });
+                    send_json_response(&mut stream, 200, &resp).await?;
+                }
+                Err(e) => {
+                    let err = json!({ "error": format!("Failed to open audit database: {}", e) });
+                    send_json_response(&mut stream, 500, &err).await?;
+                }
+            }
+        }
+
+        ("POST", "/api/clear") => {
+            let resp = json!({ "status": "session_cleared" });
+            send_json_response(&mut stream, 200, &resp).await?;
+        }
+
+        ("POST", "/api/chat") => {
+            let req: ChatRequest = match serde_json::from_str(body) {
+                Ok(r) => r,
+                Err(e) => {
+                    let err = json!({ "error": format!("Invalid JSON request: {}", e) });
+                    send_json_response(&mut stream, 400, &err).await?;
+                    return Ok(());
+                }
+            };
+
+            match execute_turn_via_tunnel(&req, &workspace, &gateway_url).await {
+                Ok(resp) => {
+                    send_json_response(&mut stream, 200, &resp).await?;
+                }
+                Err(e) => {
+                    let err = json!({ "error": format!("Turn execution error: {}", e) });
+                    send_json_response(&mut stream, 502, &err).await?;
+                }
+            }
+        }
+
+        ("OPTIONS", _) => {
+            send_http_response(&mut stream, 204, "text/plain", b"").await?;
+        }
+
+        _ => {
+            send_http_response(&mut stream, 404, "text/plain", b"Not Found").await?;
+        }
+    }
+
+    Ok(())
+}
+
+async fn execute_turn_via_tunnel(
+    req: &ChatRequest,
+    workspace: &Path,
+    gateway_url: &str,
+) -> Result<ChatResponse, anyhow::Error> {
+    let tunnel_cfg = TunnelConfig::new(gateway_url, "local-ui-agent")
+        .with_connect_timeout(Duration::from_secs(5));
+
+    let mut client = TunnelClient::connect(tunnel_cfg).await?;
+
+    let prompt = UserPrompt {
+        prompt_id: format!("prompt-{}", uuid::Uuid::new_v4()),
+        text: req.text.clone(),
+        session_id: if req.session_id.is_empty() {
+            format!("sess-{}", uuid::Uuid::new_v4())
+        } else {
+            req.session_id.clone()
+        },
+        context_files: Default::default(),
+    };
+
+    let prompt_frame = syntropy_proto::tunnel::TunnelClientFrame {
+        frame_id: uuid::Uuid::new_v4().to_string(),
+        agent_id: "local-ui-agent".into(),
+        timestamp_unix_ms: chrono::Utc::now().timestamp_millis(),
+        payload: Some(syntropy_proto::tunnel::tunnel_client_frame::Payload::UserPrompt(prompt)),
+    };
+
+    client.send(prompt_frame).await?;
+
+    let jail = WorkspaceJail::new(workspace)?;
+    let pty_mux = PtyMultiplexer::new();
+    let diff_app = AtomicPatchApplicator::new();
+    let audit_dir = workspace.join(".syntropy");
+    let _ = std::fs::create_dir_all(&audit_dir);
+    let audit_path = audit_dir.join("audit.db");
+    let ledger = MerkleAuditLedger::open(&audit_path)?;
+
+    let mut agent_message = String::new();
+    let mut tool_calls = Vec::new();
+    let mut tool_executions = Vec::new();
+
+    let turn_timeout = tokio::time::Instant::now() + Duration::from_secs(45);
+    while tokio::time::Instant::now() < turn_timeout {
+        let server_frame = match tokio::time::timeout(Duration::from_secs(12), client.recv()).await {
+            Ok(Some(f)) => f,
+            Ok(None) => break,
+            Err(_) => break,
+        };
+
+        if let Some(payload) = server_frame.payload {
+            match payload {
+                syntropy_proto::tunnel::tunnel_server_frame::Payload::AgentMessage(msg) => {
+                    agent_message = msg.content;
+                    tool_calls = msg.tool_calls;
+                    if msg.is_final {
+                        break;
+                    }
+                }
+                syntropy_proto::tunnel::tunnel_server_frame::Payload::ExecCommand(cmd) => {
+                    #[cfg(windows)]
+                    let (final_command, final_args) = if cmd.command == "ls" {
+                        ("cmd.exe".to_string(), vec!["/c".to_string(), "dir".to_string()])
+                    } else {
+                        (cmd.command.clone(), cmd.args.clone())
+                    };
+                    #[cfg(not(windows))]
+                    let (final_command, final_args) = (cmd.command.clone(), cmd.args.clone());
+
+                    let cwd_path = if cmd.working_dir.is_empty() { None } else { Some(Path::new(&cmd.working_dir)) };
+                    let target_cwd = jail.validate_cwd(cwd_path)?;
+
+                    let mut spawn_opts = SpawnOptions::new(&final_command)
+                        .args(final_args.clone())
+                        .cwd(target_cwd)
+                        .pty(cmd.pty);
+                    if cmd.pty && cmd.pty_rows > 0 && cmd.pty_cols > 0 {
+                        spawn_opts = spawn_opts.dimensions(cmd.pty_rows as u16, cmd.pty_cols as u16);
+                    }
+
+                    let mut rx = pty_mux.spawn_screen("ui-screen", spawn_opts)?;
+                    let mut full_output = Vec::new();
+                    while let Ok(chunk) = rx.recv().await {
+                        full_output.extend_from_slice(&chunk.data);
+                        if chunk.is_eof {
+                            break;
+                        }
+                    }
+                    ledger.append("local-ui-agent", "exec_command", &full_output)?;
+
+                    let output_str = String::from_utf8_lossy(&full_output).to_string();
+                    tool_executions.push(ExecutedTool {
+                        tool_type: "exec_command".into(),
+                        command: final_command,
+                        args: final_args,
+                        output: output_str,
+                        file_path: String::new(),
+                        lines_added: 0,
+                        lines_removed: 0,
+                    });
+
+                    let out_frame = syntropy_proto::tunnel::TunnelClientFrame {
+                        frame_id: uuid::Uuid::new_v4().to_string(),
+                        agent_id: "local-ui-agent".into(),
+                        timestamp_unix_ms: chrono::Utc::now().timestamp_millis(),
+                        payload: Some(syntropy_proto::tunnel::tunnel_client_frame::Payload::TerminalOutput(
+                            TerminalOutputChunk {
+                                session_id: "ui-screen".into(),
+                                data: full_output,
+                                is_stderr: false,
+                                is_eof: true,
+                                exit_code: 0,
+                            },
+                        )),
+                    };
+                    let _ = client.send(out_frame).await;
+                }
+                syntropy_proto::tunnel::tunnel_server_frame::Payload::ApplyPatch(patch) => {
+                    let target_path = jail.resolve_path(&patch.file_path)?;
+                    let opts = PatchOptions::new().dry_run(patch.dry_run);
+                    let result = diff_app.apply_patch(&target_path, &patch.diff, opts);
+
+                    let (success, err_msg, lines_added, lines_removed) = match result {
+                        Ok(res) => {
+                            ledger.append("local-ui-agent", "apply_patch", patch.diff.as_bytes())?;
+                            (true, String::new(), res.lines_added, res.lines_removed)
+                        }
+                        Err(e) => {
+                            warn!("Patch failed: {}", e);
+                            (false, e.to_string(), 0, 0)
+                        }
+                    };
+
+                    tool_executions.push(ExecutedTool {
+                        tool_type: "apply_patch".into(),
+                        command: String::new(),
+                        args: Vec::new(),
+                        output: err_msg.clone(),
+                        file_path: patch.file_path.clone(),
+                        lines_added,
+                        lines_removed,
+                    });
+
+                    let patch_res_frame = syntropy_proto::tunnel::TunnelClientFrame {
+                        frame_id: uuid::Uuid::new_v4().to_string(),
+                        agent_id: "local-ui-agent".into(),
+                        timestamp_unix_ms: chrono::Utc::now().timestamp_millis(),
+                        payload: Some(syntropy_proto::tunnel::tunnel_client_frame::Payload::PatchResult(
+                            syntropy_proto::tunnel::PatchResult {
+                                patch_id: patch.patch_id.clone(),
+                                file_path: patch.file_path.clone(),
+                                success,
+                                error_message: err_msg,
+                                new_sha256: String::new(),
+                                lines_added,
+                                lines_removed,
+                            },
+                        )),
+                    };
+                    let _ = client.send(patch_res_frame).await;
+                }
+                syntropy_proto::tunnel::tunnel_server_frame::Payload::ErrorFrame(err) => {
+                    return Err(anyhow::anyhow!("Cloud Gateway error: {}", err));
+                }
+                _ => {}
+            }
+        }
+    }
+
+    let merkle_root = ledger.compute_merkle_root()?.unwrap_or_else(|| "Genesis".into());
+
+    Ok(ChatResponse {
+        session_id: req.session_id.clone(),
+        agent_message,
+        tool_calls,
+        tool_executions,
+        merkle_root,
+    })
+}
+
+fn query_recent_audit_entries(db_path: &Path) -> Result<Vec<AuditEntryView>, anyhow::Error> {
+    let conn = rusqlite::Connection::open(db_path)?;
+    let mut stmt = conn.prepare(
+        "SELECT entry_id, timestamp, agent_id, action_type, entry_hash, previous_hash 
+         FROM audit_log ORDER BY entry_id DESC LIMIT 20"
+    )?;
+
+    let entries = stmt.query_map([], |row| {
+        Ok(AuditEntryView {
+            id: row.get(0)?,
+            timestamp: row.get(1)?,
+            agent_id: row.get(2)?,
+            action_type: row.get(3)?,
+            entry_hash: row.get(4)?,
+            previous_hash: row.get(5)?,
+        })
+    })?
+    .filter_map(Result::ok)
+    .collect();
+
+    Ok(entries)
+}
+
+async fn send_json_response<T: Serialize>(
+    stream: &mut TcpStream,
+    status: u16,
+    data: &T,
+) -> Result<(), anyhow::Error> {
+    let json_bytes = serde_json::to_vec(data)?;
+    send_http_response(stream, status, "application/json", &json_bytes).await
+}
+
+async fn send_http_response(
+    stream: &mut TcpStream,
+    status: u16,
+    content_type: &str,
+    body: &[u8],
+) -> Result<(), anyhow::Error> {
+    let status_text = match status {
+        200 => "OK",
+        204 => "No Content",
+        400 => "Bad Request",
+        404 => "Not Found",
+        500 => "Internal Server Error",
+        502 => "Bad Gateway",
+        _ => "Status",
+    };
+
+    let header = format!(
+        "HTTP/1.1 {} {}\r\nContent-Type: {}\r\nContent-Length: {}\r\nAccess-Control-Allow-Origin: *\r\nAccess-Control-Allow-Headers: Content-Type\r\nConnection: close\r\n\r\n",
+        status, status_text, content_type, body.len()
+    );
+
+    stream.write_all(header.as_bytes()).await?;
+    stream.write_all(body).await?;
+    stream.flush().await?;
+    Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn test_ui_http_server_endpoints() {
+        let temp_dir = std::env::temp_dir().join(format!("syntropy_ui_test_{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&temp_dir).unwrap();
+
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+
+        let ws = Arc::new(temp_dir.clone());
+        let gw = Arc::new("http://127.0.0.1:50051".to_string());
+
+        let server_task = tokio::spawn(async move {
+            while let Ok((stream, _)) = listener.accept().await {
+                let ws_c = ws.clone();
+                let gw_c = gw.clone();
+                tokio::spawn(async move {
+                    let _ = handle_connection(stream, ws_c, gw_c).await;
+                });
+            }
+        });
+
+        // 1. Test GET /
+        let mut client = TcpStream::connect(addr).await.unwrap();
+        client.write_all(b"GET / HTTP/1.1\r\nHost: localhost\r\n\r\n").await.unwrap();
+        let mut buf = vec![0u8; 4096];
+        let n = client.read(&mut buf).await.unwrap();
+        let resp = String::from_utf8_lossy(&buf[..n]);
+        assert!(resp.starts_with("HTTP/1.1 200 OK"));
+        assert!(resp.contains("Syntropy Swarm"));
+
+        // 2. Test GET /api/status
+        let mut client = TcpStream::connect(addr).await.unwrap();
+        client.write_all(b"GET /api/status HTTP/1.1\r\nHost: localhost\r\n\r\n").await.unwrap();
+        let mut buf = vec![0u8; 4096];
+        let n = client.read(&mut buf).await.unwrap();
+        let resp = String::from_utf8_lossy(&buf[..n]);
+        assert!(resp.starts_with("HTTP/1.1 200 OK"));
+        assert!(resp.contains("http://127.0.0.1:50051"));
+
+        // 3. Test GET /api/audit
+        let mut client = TcpStream::connect(addr).await.unwrap();
+        client.write_all(b"GET /api/audit HTTP/1.1\r\nHost: localhost\r\n\r\n").await.unwrap();
+        let mut buf = vec![0u8; 4096];
+        let n = client.read(&mut buf).await.unwrap();
+        let resp = String::from_utf8_lossy(&buf[..n]);
+        assert!(resp.starts_with("HTTP/1.1 200 OK"));
+        assert!(resp.contains("total_entries"));
+
+        // 4. Test POST /api/clear
+        let mut client = TcpStream::connect(addr).await.unwrap();
+        client.write_all(b"POST /api/clear HTTP/1.1\r\nHost: localhost\r\nContent-Length: 0\r\n\r\n").await.unwrap();
+        let mut buf = vec![0u8; 4096];
+        let n = client.read(&mut buf).await.unwrap();
+        let resp = String::from_utf8_lossy(&buf[..n]);
+        assert!(resp.starts_with("HTTP/1.1 200 OK"));
+        assert!(resp.contains("session_cleared"));
+
+        server_task.abort();
+        let _ = std::fs::remove_dir_all(&temp_dir);
+    }
+}

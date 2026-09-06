@@ -14,6 +14,8 @@ use syntropy_proto::tunnel::{
 use syntropy_security::{CredentialBroker, KeyStore, MerkleAuditLedger, OAuthSession};
 use syntropy_tunnel::{MockGatewayServer, TunnelClient, TunnelConfig};
 
+mod ui;
+
 #[derive(Parser)]
 #[command(name = "syntropy")]
 #[command(about = "Syntropy: Cross-Platform Autonomous Cloud Agent System", long_about = None)]
@@ -49,6 +51,21 @@ enum Commands {
         /// Gateway server URL (e.g. http://127.0.0.1:50051)
         #[arg(short, long)]
         server_url: Option<String>,
+    },
+
+    /// Launch the local web UI front end to chat with the Cloud Swarm Gateway
+    Ui {
+        /// Local HTTP port to bind
+        #[arg(short, long, default_value = "3000")]
+        port: u16,
+
+        /// Gateway server URL (e.g. http://127.0.0.1:50051)
+        #[arg(short, long)]
+        server_url: Option<String>,
+
+        /// Do not automatically open the web browser
+        #[arg(long, default_value = "false")]
+        no_open: bool,
     },
 
     /// Start the background daemon service and connect to the agent gateway
@@ -345,6 +362,11 @@ async fn main() -> Result<(), anyhow::Error> {
                     }
                 }
             }
+        }
+
+        Commands::Ui { port, server_url, no_open } => {
+            let target_url = server_url.unwrap_or_else(|| config.daemon.server_url.clone());
+            ui::start_ui_server(port, target_url, workspace_root, no_open).await?;
         }
 
         Commands::Daemon { server_url } => {

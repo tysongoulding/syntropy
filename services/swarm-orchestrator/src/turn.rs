@@ -1,10 +1,12 @@
+use std::collections::HashMap;
 use std::sync::Arc;
+use tokio::sync::Mutex;
 use syntropy_proto::tunnel::{
     self, AgentMessage, ApplyPatch, ExecCommand, TunnelServerFrame, UserPrompt,
 };
 use tracing::info;
 
-use crate::gemini::{GeminiClient, GeminiTurnResult};
+use crate::gemini::{ChatMessage, GeminiClient, GeminiTurnResult};
 
 /// Represents the actions and messages resulting from an evaluated user prompt.
 #[derive(Debug, Clone)]
@@ -19,11 +21,27 @@ pub struct TurnExecutionPlan {
 #[derive(Clone)]
 pub struct AgentTurnEngine {
     gemini: Arc<GeminiClient>,
+    sessions: Arc<Mutex<HashMap<String, Vec<ChatMessage>>>>,
 }
 
 impl AgentTurnEngine {
     pub fn new(gemini: Arc<GeminiClient>) -> Self {
-        Self { gemini }
+        Self {
+            gemini,
+            sessions: Arc::new(Mutex::new(HashMap::new())),
+        }
+    }
+
+    /// Retrieve conversation history for a given session.
+    pub async fn get_session_history(&self, session_id: &str) -> Vec<ChatMessage> {
+        let guard = self.sessions.lock().await;
+        guard.get(session_id).cloned().unwrap_or_default()
+    }
+
+    /// Clear conversation history for a session.
+    pub async fn clear_session(&self, session_id: &str) {
+        let mut guard = self.sessions.lock().await;
+        guard.remove(session_id);
     }
 
     /// Process an incoming UserPrompt and generate appropriate agent messages and tool action frames.
@@ -34,6 +52,7 @@ impl AgentTurnEngine {
     ) -> Result<TurnExecutionPlan, anyhow::Error> {
         info!(
             prompt_id = %prompt.prompt_id,
+            session_id = %prompt.session_id,
             agent_id = %agent_id,
             dev_mock = self.gemini.is_dev_mock(),
             "Processing user prompt through Gemini Turn Engine"
@@ -53,10 +72,33 @@ impl AgentTurnEngine {
              Always formulate valid executable commands for the host operating system."
         );
 
+        let history = if !prompt.session_id.is_empty() {
+            let guard = self.sessions.lock().await;
+            guard.get(&prompt.session_id).cloned().unwrap_or_default()
+        } else {
+            Vec::new()
+        };
+
         let result: GeminiTurnResult = self
             .gemini
-            .generate_turn(&prompt.text, Some(&system_directive), &[])
+            .generate_turn(&prompt.text, Some(&system_directive), &history)
             .await?;
+
+        // Record history if session_id is present
+        if !prompt.session_id.is_empty() {
+            let mut guard = self.sessions.lock().await;
+            let hist = guard.entry(prompt.session_id.clone()).or_default();
+            hist.push(ChatMessage {
+                role: "user".into(),
+                text: prompt.text.clone(),
+            });
+            if !result.content.is_empty() {
+                hist.push(ChatMessage {
+                    role: "model".into(),
+                    text: result.content.clone(),
+                });
+            }
+        }
 
         let mut server_frames = Vec::new();
         let mut tool_names = Vec::new();
