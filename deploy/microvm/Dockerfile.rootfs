@@ -1,0 +1,67 @@
+# Base rootfs for Grokbot-style cloud agent microVM
+FROM ubuntu:24.04
+
+ENV DEBIAN_FRONTEND=noninteractive
+ENV DISPLAY=:1
+
+# 1. System packages & desktop environment (minimal X11, openbox/xfce, utils)
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    ca-certificates \
+    curl \
+    wget \
+    git \
+    sudo \
+    procps \
+    net-tools \
+    iproute2 \
+    iptables \
+    xvfb \
+    x11vnc \
+    novnc \
+    websockify \
+    openbox \
+    xterm \
+    chromium-browser \
+    dbus-x11 \
+    python3 \
+    python3-pip \
+    nodejs \
+    npm \
+    flock \
+    && rm -rf /var/lib/apt/lists/*
+
+# 2. Configure 'box' user matching target VM (UID 1000, passwordless sudo)
+RUN useradd -m -s /bin/bash -u 1000 box && \
+    echo "box ALL=(ALL) NOPASSWD:ALL" >> /etc/sudoers.d/box && \
+    chmod 0440 /etc/sudoers.d/box
+
+# 3. Create workspace & token directory layout
+RUN mkdir -p /workspace /exec-daemon /tmp/sand-novnc-tokens.d /tmp/.X11-unix && \
+    chown -R box:box /workspace /exec-daemon /tmp/sand-novnc-tokens.d /tmp/.X11-unix && \
+    chmod 1777 /tmp/.X11-unix /tmp/sand-novnc-tokens.d
+
+# 4. Install bounded log helper
+RUN cat << 'EOF' > /usr/local/bin/box-bounded-log
+#!/usr/bin/env bash
+LOG_FILE=""
+while [[ $# -gt 0 ]]; do
+  case $1 in
+    --run) LOG_FILE="$2"; shift 2 ;;
+    --) shift; break ;;
+    *) shift ;;
+  esac
+done
+if [ -n "$LOG_FILE" ]; then
+  exec "$@" >> "$LOG_FILE" 2>&1
+else
+  exec "$@"
+fi
+EOF
+RUN chmod +x /usr/local/bin/box-bounded-log
+
+WORKDIR /workspace
+USER box
+
+EXPOSE 6080 6081 5900 5901 5904 5907 8444
+
+CMD ["/bin/bash"]
