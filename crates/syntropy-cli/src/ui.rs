@@ -8,9 +8,7 @@ use tokio::net::{TcpListener, TcpStream};
 use tracing::{error, info, warn};
 
 use syntropy_exec::{AtomicPatchApplicator, PatchOptions, PtyMultiplexer, SpawnOptions, WorkspaceJail};
-use syntropy_proto::tunnel::{
-    TerminalOutputChunk, UserPrompt,
-};
+use syntropy_proto::tunnel::UserPrompt;
 use syntropy_security::MerkleAuditLedger;
 use syntropy_tunnel::{TunnelClient, TunnelConfig};
 
@@ -21,6 +19,8 @@ struct ChatRequest {
     text: String,
     #[serde(default)]
     session_id: String,
+    #[serde(default)]
+    api_key: Option<String>,
 }
 
 #[derive(Debug, Serialize)]
@@ -289,11 +289,6 @@ async fn execute_turn_via_tunnel(
     workspace: &Path,
     gateway_url: &str,
 ) -> Result<ChatResponse, anyhow::Error> {
-    let tunnel_cfg = TunnelConfig::new(gateway_url, "local-ui-agent")
-        .with_connect_timeout(Duration::from_secs(5));
-
-    let mut client = TunnelClient::connect(tunnel_cfg).await?;
-
     let prompt = UserPrompt {
         prompt_id: format!("prompt-{}", uuid::Uuid::new_v4()),
         text: req.text.clone(),
@@ -305,15 +300,6 @@ async fn execute_turn_via_tunnel(
         context_files: Default::default(),
     };
 
-    let prompt_frame = syntropy_proto::tunnel::TunnelClientFrame {
-        frame_id: uuid::Uuid::new_v4().to_string(),
-        agent_id: "local-ui-agent".into(),
-        timestamp_unix_ms: chrono::Utc::now().timestamp_millis(),
-        payload: Some(syntropy_proto::tunnel::tunnel_client_frame::Payload::UserPrompt(prompt)),
-    };
-
-    client.send(prompt_frame).await?;
-
     let jail = WorkspaceJail::new(workspace)?;
     let pty_mux = PtyMultiplexer::new();
     let diff_app = AtomicPatchApplicator::new();
@@ -322,190 +308,83 @@ async fn execute_turn_via_tunnel(
     let audit_path = audit_dir.join("audit.db");
     let ledger = MerkleAuditLedger::open(&audit_path)?;
 
+    let mut tool_executions = Vec::new();
+    let mut server_frames_to_execute = Vec::new();
     let mut agent_message = String::new();
     let mut tool_calls = Vec::new();
-    let mut tool_executions = Vec::new();
 
-    let turn_timeout = tokio::time::Instant::now() + Duration::from_secs(45);
-    while tokio::time::Instant::now() < turn_timeout {
-        let server_frame = match tokio::time::timeout(Duration::from_secs(12), client.recv()).await {
-            Ok(Some(f)) => f,
-            Ok(None) => break,
-            Err(_) => break,
-        };
+    // 1. Try remote gateway tunnel first if available
+    let tunnel_cfg = TunnelConfig::new(gateway_url, "local-ui-agent")
+        .with_connect_timeout(Duration::from_millis(1500));
 
-        if let Some(payload) = server_frame.payload {
-            match payload {
-                syntropy_proto::tunnel::tunnel_server_frame::Payload::AgentMessage(msg) => {
-                    agent_message = msg.content;
-                    tool_calls = msg.tool_calls;
-                    if msg.is_final {
-                        break;
-                    }
-                }
-                syntropy_proto::tunnel::tunnel_server_frame::Payload::ExecCommand(cmd) => {
-                    #[cfg(windows)]
-                    let (final_command, final_args) = if cmd.command == "ls" {
-                        ("cmd.exe".to_string(), vec!["/c".to_string(), "dir".to_string()])
-                    } else {
-                        (cmd.command.clone(), cmd.args.clone())
-                    };
-                    #[cfg(not(windows))]
-                    let (final_command, final_args) = (cmd.command.clone(), cmd.args.clone());
+    match TunnelClient::connect(tunnel_cfg).await {
+        Ok(mut client) => {
+            let prompt_frame = syntropy_proto::tunnel::TunnelClientFrame {
+                frame_id: uuid::Uuid::new_v4().to_string(),
+                agent_id: "local-ui-agent".into(),
+                timestamp_unix_ms: chrono::Utc::now().timestamp_millis(),
+                payload: Some(syntropy_proto::tunnel::tunnel_client_frame::Payload::UserPrompt(prompt.clone())),
+            };
 
-                    let cwd_path = if cmd.working_dir.is_empty() { None } else { Some(Path::new(&cmd.working_dir)) };
-                    let target_cwd = jail.validate_cwd(cwd_path)?;
+            let _ = client.send(prompt_frame).await;
 
-                    let mut spawn_opts = SpawnOptions::new(&final_command)
-                        .args(final_args.clone())
-                        .cwd(target_cwd)
-                        .pty(cmd.pty);
-                    if cmd.pty && cmd.pty_rows > 0 && cmd.pty_cols > 0 {
-                        spawn_opts = spawn_opts.dimensions(cmd.pty_rows as u16, cmd.pty_cols as u16);
-                    }
+            let turn_timeout = tokio::time::Instant::now() + Duration::from_secs(45);
+            while tokio::time::Instant::now() < turn_timeout {
+                let server_frame = match tokio::time::timeout(Duration::from_secs(12), client.recv()).await {
+                    Ok(Some(f)) => f,
+                    Ok(None) => break,
+                    Err(_) => break,
+                };
 
-                    let mut rx = pty_mux.spawn_screen("ui-screen", spawn_opts)?;
-                    let mut full_output = Vec::new();
-                    while let Ok(chunk) = rx.recv().await {
-                        full_output.extend_from_slice(&chunk.data);
-                        if chunk.is_eof {
-                            break;
+                if let Some(payload) = server_frame.payload {
+                    match payload {
+                        syntropy_proto::tunnel::tunnel_server_frame::Payload::AgentMessage(msg) => {
+                            agent_message = msg.content;
+                            tool_calls = msg.tool_calls;
+                            if msg.is_final {
+                                break;
+                            }
+                        }
+                        other => {
+                            server_frames_to_execute.push(other);
                         }
                     }
-                    ledger.append("local-ui-agent", "exec_command", &full_output)?;
-
-                    let output_str = sanitize_terminal_output(&String::from_utf8_lossy(&full_output));
-                    tool_executions.push(ExecutedTool {
-                        tool_type: "exec_command".into(),
-                        command: final_command,
-                        args: final_args,
-                        output: output_str,
-                        file_path: String::new(),
-                        lines_added: 0,
-                        lines_removed: 0,
-                        screenshot_base64: None,
-                        url: None,
-                        title: None,
-                    });
-
-                    let out_frame = syntropy_proto::tunnel::TunnelClientFrame {
-                        frame_id: uuid::Uuid::new_v4().to_string(),
-                        agent_id: "local-ui-agent".into(),
-                        timestamp_unix_ms: chrono::Utc::now().timestamp_millis(),
-                        payload: Some(syntropy_proto::tunnel::tunnel_client_frame::Payload::TerminalOutput(
-                            TerminalOutputChunk {
-                                session_id: "ui-screen".into(),
-                                data: full_output,
-                                is_stderr: false,
-                                is_eof: true,
-                                exit_code: 0,
-                            },
-                        )),
-                    };
-                    let _ = client.send(out_frame).await;
                 }
-                syntropy_proto::tunnel::tunnel_server_frame::Payload::ApplyPatch(patch) => {
-                    let target_path = jail.resolve_path(&patch.file_path)?;
-                    let opts = PatchOptions::new().dry_run(patch.dry_run);
-                    let result = diff_app.apply_patch(&target_path, &patch.diff, opts);
-
-                    let (success, err_msg, lines_added, lines_removed) = match result {
-                        Ok(res) => {
-                            ledger.append("local-ui-agent", "apply_patch", patch.diff.as_bytes())?;
-                            (true, String::new(), res.lines_added, res.lines_removed)
-                        }
-                        Err(e) => {
-                            warn!("Patch failed: {}", e);
-                            (false, e.to_string(), 0, 0)
-                        }
-                    };
-
-                    tool_executions.push(ExecutedTool {
-                        tool_type: "apply_patch".into(),
-                        command: String::new(),
-                        args: Vec::new(),
-                        output: err_msg.clone(),
-                        file_path: patch.file_path.clone(),
-                        lines_added,
-                        lines_removed,
-                        screenshot_base64: None,
-                        url: None,
-                        title: None,
-                    });
-
-                    let patch_res_frame = syntropy_proto::tunnel::TunnelClientFrame {
-                        frame_id: uuid::Uuid::new_v4().to_string(),
-                        agent_id: "local-ui-agent".into(),
-                        timestamp_unix_ms: chrono::Utc::now().timestamp_millis(),
-                        payload: Some(syntropy_proto::tunnel::tunnel_client_frame::Payload::PatchResult(
-                            syntropy_proto::tunnel::PatchResult {
-                                patch_id: patch.patch_id.clone(),
-                                file_path: patch.file_path.clone(),
-                                success,
-                                error_message: err_msg,
-                                new_sha256: String::new(),
-                                lines_added,
-                                lines_removed,
-                            },
-                        )),
-                    };
-                    let _ = client.send(patch_res_frame).await;
-                }
-                syntropy_proto::tunnel::tunnel_server_frame::Payload::McpRequest(mcp_req) => {
-                    if mcp_req.server_name == "browser" || mcp_req.tool_name == "browser_action" {
-                        let action_req: crate::browser::BrowserAction = serde_json::from_str(&mcp_req.arguments_json)
-                            .unwrap_or_else(|_| crate::browser::BrowserAction {
-                                action: "navigate".into(),
-                                url: Some("https://www.google.com".into()),
-                                selector: None,
-                                text: None,
-                            });
-
-                        let b_res = crate::browser::execute_browser_action(9222, &action_req).await?;
-                        let res_json = serde_json::to_string(&b_res).unwrap_or_default();
-                        ledger.append("local-ui-agent", "browser_action", res_json.as_bytes())?;
-
-                        let output = if b_res.content.is_empty() {
-                            b_res.error_message.clone().unwrap_or_else(|| "Browser action completed".into())
-                        } else {
-                            b_res.content.clone()
-                        };
-
-                        tool_executions.push(ExecutedTool {
-                            tool_type: "browser_action".into(),
-                            command: format!("browser: {}", b_res.action),
-                            args: vec![b_res.url.clone(), action_req.selector.unwrap_or_default()],
-                            output,
-                            file_path: String::new(),
-                            lines_added: 0,
-                            lines_removed: 0,
-                            screenshot_base64: b_res.screenshot_base64,
-                            url: Some(b_res.url),
-                            title: Some(b_res.title),
-                        });
-
-                        let mcp_resp_frame = syntropy_proto::tunnel::TunnelClientFrame {
-                            frame_id: uuid::Uuid::new_v4().to_string(),
-                            agent_id: "local-ui-agent".into(),
-                            timestamp_unix_ms: chrono::Utc::now().timestamp_millis(),
-                            payload: Some(syntropy_proto::tunnel::tunnel_client_frame::Payload::McpResponse(
-                                syntropy_proto::tunnel::McpInvokeResponse {
-                                    invocation_id: mcp_req.invocation_id.clone(),
-                                    success: b_res.success,
-                                    result_json: res_json,
-                                    error_message: b_res.error_message.unwrap_or_default(),
-                                },
-                            )),
-                        };
-                        let _ = client.send(mcp_resp_frame).await;
-                    }
-                }
-                syntropy_proto::tunnel::tunnel_server_frame::Payload::ErrorFrame(err) => {
-                    return Err(anyhow::anyhow!("Cloud Gateway error: {}", err));
-                }
-                _ => {}
             }
         }
+        Err(_) => {
+            // 2. Gateway is offline -> evaluate prompt directly via in-process GeminiClient / TurnEngine
+            info!("Cloud Gateway offline at {}, evaluating prompt directly with Gemini Turn Engine", gateway_url);
+            let gemini = if let Some(ref key) = req.api_key {
+                if !key.trim().is_empty() {
+                    syntropy_orchestrator::GeminiClient::with_api_key(key.trim(), None)
+                } else {
+                    syntropy_orchestrator::GeminiClient::from_env()
+                }
+            } else {
+                syntropy_orchestrator::GeminiClient::from_env()
+            };
+
+            let engine = syntropy_orchestrator::AgentTurnEngine::new(Arc::new(gemini));
+            let plan = engine.process_prompt(&prompt, "local-ui-agent").await?;
+
+            agent_message = plan.agent_message.content;
+            tool_calls = plan.agent_message.tool_calls;
+
+            for frame in plan.server_frames_to_send {
+                if let Some(p) = frame.payload {
+                    match p {
+                        syntropy_proto::tunnel::tunnel_server_frame::Payload::AgentMessage(_) => {}
+                        other => server_frames_to_execute.push(other),
+                    }
+                }
+            }
+        }
+    }
+
+    // 3. Execute all scheduled tool frames inside the workspace jail & PTY multiplexer
+    for payload in server_frames_to_execute {
+        execute_tool_frame_locally(payload, &jail, &pty_mux, &diff_app, &ledger, &mut tool_executions).await?;
     }
 
     let merkle_root = ledger.compute_merkle_root()?.unwrap_or_else(|| "Genesis".into());
@@ -517,6 +396,128 @@ async fn execute_turn_via_tunnel(
         tool_executions,
         merkle_root,
     })
+}
+
+async fn execute_tool_frame_locally(
+    payload: syntropy_proto::tunnel::tunnel_server_frame::Payload,
+    jail: &WorkspaceJail,
+    pty_mux: &PtyMultiplexer,
+    diff_app: &AtomicPatchApplicator,
+    ledger: &MerkleAuditLedger,
+    tool_executions: &mut Vec<ExecutedTool>,
+) -> Result<(), anyhow::Error> {
+    match payload {
+        syntropy_proto::tunnel::tunnel_server_frame::Payload::ExecCommand(cmd) => {
+            #[cfg(windows)]
+            let (final_command, final_args) = if cmd.command == "ls" {
+                ("cmd.exe".to_string(), vec!["/c".to_string(), "dir".to_string()])
+            } else {
+                (cmd.command.clone(), cmd.args.clone())
+            };
+            #[cfg(not(windows))]
+            let (final_command, final_args) = (cmd.command.clone(), cmd.args.clone());
+
+            let cwd_path = if cmd.working_dir.is_empty() { None } else { Some(Path::new(&cmd.working_dir)) };
+            let target_cwd = jail.validate_cwd(cwd_path)?;
+
+            let mut spawn_opts = SpawnOptions::new(&final_command)
+                .args(final_args.clone())
+                .cwd(target_cwd)
+                .pty(cmd.pty);
+            if cmd.pty && cmd.pty_rows > 0 && cmd.pty_cols > 0 {
+                spawn_opts = spawn_opts.dimensions(cmd.pty_rows as u16, cmd.pty_cols as u16);
+            }
+
+            let mut rx = pty_mux.spawn_screen("ui-screen", spawn_opts)?;
+            let mut full_output = Vec::new();
+            while let Ok(chunk) = rx.recv().await {
+                full_output.extend_from_slice(&chunk.data);
+                if chunk.is_eof {
+                    break;
+                }
+            }
+            ledger.append("local-ui-agent", "exec_command", &full_output)?;
+
+            let output_str = sanitize_terminal_output(&String::from_utf8_lossy(&full_output));
+            tool_executions.push(ExecutedTool {
+                tool_type: "exec_command".into(),
+                command: final_command,
+                args: final_args,
+                output: output_str,
+                file_path: String::new(),
+                lines_added: 0,
+                lines_removed: 0,
+                screenshot_base64: None,
+                url: None,
+                title: None,
+            });
+        }
+        syntropy_proto::tunnel::tunnel_server_frame::Payload::ApplyPatch(patch) => {
+            let target_path = jail.resolve_path(&patch.file_path)?;
+            let opts = PatchOptions::new().dry_run(patch.dry_run);
+            let result = diff_app.apply_patch(&target_path, &patch.diff, opts);
+
+            let (_success, err_msg, lines_added, lines_removed) = match result {
+                Ok(res) => {
+                    ledger.append("local-ui-agent", "apply_patch", patch.diff.as_bytes())?;
+                    (true, String::new(), res.lines_added, res.lines_removed)
+                }
+                Err(e) => {
+                    warn!("Patch failed: {}", e);
+                    (false, e.to_string(), 0, 0)
+                }
+            };
+
+            tool_executions.push(ExecutedTool {
+                tool_type: "apply_patch".into(),
+                command: String::new(),
+                args: Vec::new(),
+                output: err_msg,
+                file_path: patch.file_path,
+                lines_added,
+                lines_removed,
+                screenshot_base64: None,
+                url: None,
+                title: None,
+            });
+        }
+        syntropy_proto::tunnel::tunnel_server_frame::Payload::McpRequest(mcp_req)
+            if mcp_req.server_name == "browser" || mcp_req.tool_name == "browser_action" =>
+        {
+            let action_req: crate::browser::BrowserAction = serde_json::from_str(&mcp_req.arguments_json)
+                    .unwrap_or_else(|_| crate::browser::BrowserAction {
+                        action: "navigate".into(),
+                        url: Some("https://www.google.com".into()),
+                        selector: None,
+                        text: None,
+                    });
+
+                let b_res = crate::browser::execute_browser_action(9222, &action_req).await?;
+                let res_json = serde_json::to_string(&b_res).unwrap_or_default();
+                ledger.append("local-ui-agent", "browser_action", res_json.as_bytes())?;
+
+                let output = if b_res.content.is_empty() {
+                    b_res.error_message.clone().unwrap_or_else(|| "Browser action completed".into())
+                } else {
+                    b_res.content.clone()
+                };
+
+                tool_executions.push(ExecutedTool {
+                    tool_type: "browser_action".into(),
+                    command: format!("browser: {}", b_res.action),
+                    args: vec![b_res.url.clone(), action_req.selector.unwrap_or_default()],
+                    output,
+                    file_path: String::new(),
+                    lines_added: 0,
+                    lines_removed: 0,
+                    screenshot_base64: b_res.screenshot_base64,
+                    url: Some(b_res.url),
+                    title: Some(b_res.title),
+                });
+            }
+        _ => {}
+    }
+    Ok(())
 }
 
 fn query_recent_audit_entries(ledger: &MerkleAuditLedger) -> Vec<AuditEntryView> {

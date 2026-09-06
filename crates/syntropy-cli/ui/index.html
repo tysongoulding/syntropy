@@ -457,6 +457,11 @@
         <span id="audit-label">Audit: Verifying...</span>
       </div>
 
+      <div class="badge" id="ai-key-badge" title="Configure Google AI Studio API Key" style="cursor:pointer;">
+        <span>🔑</span>
+        <span id="ai-key-label">AI Studio Key</span>
+      </div>
+
       <button class="btn" id="new-chat-btn" title="Start a new conversational session">
         <span>➕</span>
         <span>New Chat</span>
@@ -554,6 +559,36 @@
     </div>
   </div>
 
+  <!-- Google AI Studio Key Modal -->
+  <div class="modal-backdrop" id="ai-key-modal">
+    <div class="modal" style="max-width: 480px;">
+      <div class="modal-header">
+        <div style="display: flex; align-items: center; gap: 8px;">
+          <span>🔑</span>
+          <h3 style="margin:0; font-size:1rem;">Google AI Studio API Key</h3>
+        </div>
+        <button class="btn" onclick="closeKeyModal()">✕</button>
+      </div>
+      <div class="modal-body" style="padding: 20px;">
+        <p style="font-size: 0.85rem; color: var(--text-muted); margin-bottom: 14px; line-height: 1.5;">
+          Connect your Google AI Studio Gemini API key to enable live reasoning, command generation, and tool execution. Your key is stored securely in your browser's <code style="color:var(--primary);">localStorage</code>.
+        </p>
+        <div style="display: flex; flex-direction: column; gap: 8px; margin-bottom: 16px;">
+          <label style="font-size: 0.72rem; color: var(--text-muted); text-transform: uppercase; font-weight: 600; letter-spacing: 0.5px;">API Key (AIzaSy...)</label>
+          <input type="password" id="gemini-key-input" placeholder="AIzaSy..." style="background: var(--surface-hover); border: 1px solid var(--surface-border); color: var(--text); padding: 9px 12px; border-radius: 6px; font-size: 0.85rem; width: 100%; outline: none;" />
+        </div>
+        <div style="display: flex; justify-content: space-between; align-items: center;">
+          <button class="btn" onclick="clearApiKey()" style="color: var(--danger); border-color: rgba(248,81,73,0.3);">Clear Key</button>
+          <div style="display: flex; gap: 8px;">
+            <button class="btn" onclick="closeKeyModal()">Cancel</button>
+            <button class="btn" onclick="saveApiKey()" style="background: var(--primary); color: white; border-color: var(--primary);">Save Key</button>
+          </div>
+        </div>
+        <div id="key-status-msg" style="margin-top: 12px; font-size: 0.75rem; text-align: center;"></div>
+      </div>
+    </div>
+  </div>
+
   <script>
     let sessionId = "session-" + Math.random().toString(36).substring(2, 10);
     const chatScroll = document.getElementById("chat-scroll");
@@ -580,6 +615,66 @@
     const kasmConnectBtn = document.getElementById("kasm-connect-btn");
     const kasmOpenTabBtn = document.getElementById("kasm-open-tab-btn");
     const kasmFullscreenBtn = document.getElementById("kasm-fullscreen-btn");
+    const aiKeyBadge = document.getElementById("ai-key-badge");
+    const aiKeyLabel = document.getElementById("ai-key-label");
+    const aiKeyModal = document.getElementById("ai-key-modal");
+    const geminiKeyInput = document.getElementById("gemini-key-input");
+    const keyStatusMsg = document.getElementById("key-status-msg");
+
+    function updateKeyBadgeUI() {
+      const savedKey = localStorage.getItem("syntropy_gemini_api_key");
+      if (savedKey && savedKey.trim().length > 0) {
+        aiKeyLabel.innerText = "Gemini: Active ✓";
+        aiKeyBadge.style.borderColor = "#3fb950";
+        if (geminiKeyInput) geminiKeyInput.value = savedKey;
+      } else {
+        aiKeyLabel.innerText = "AI Studio Key";
+        aiKeyBadge.style.borderColor = "var(--surface-border)";
+        if (geminiKeyInput) geminiKeyInput.value = "";
+      }
+    }
+
+    if (aiKeyBadge) {
+      aiKeyBadge.addEventListener("click", () => {
+        aiKeyModal.style.display = "flex";
+        const savedKey = localStorage.getItem("syntropy_gemini_api_key");
+        if (geminiKeyInput) {
+          geminiKeyInput.value = savedKey || "";
+          geminiKeyInput.focus();
+        }
+        if (keyStatusMsg) keyStatusMsg.innerText = "";
+      });
+    }
+
+    function closeKeyModal() {
+      if (aiKeyModal) aiKeyModal.style.display = "none";
+    }
+
+    function saveApiKey() {
+      const val = geminiKeyInput ? geminiKeyInput.value.trim() : "";
+      if (val) {
+        localStorage.setItem("syntropy_gemini_api_key", val);
+        if (keyStatusMsg) {
+          keyStatusMsg.style.color = "#3fb950";
+          keyStatusMsg.innerText = "✓ Key saved successfully!";
+        }
+        setTimeout(() => closeKeyModal(), 600);
+      } else {
+        clearApiKey();
+      }
+      updateKeyBadgeUI();
+    }
+
+    function clearApiKey() {
+      localStorage.removeItem("syntropy_gemini_api_key");
+      if (geminiKeyInput) geminiKeyInput.value = "";
+      if (keyStatusMsg) {
+        keyStatusMsg.style.color = "var(--text-muted)";
+        keyStatusMsg.innerText = "Key removed from local storage.";
+      }
+      updateKeyBadgeUI();
+      setTimeout(() => closeKeyModal(), 600);
+    }
 
     let currentVncHost = localStorage.getItem("syntropy_vnc_host") || (window.location.hostname && window.location.hostname !== "127.0.0.1" && window.location.hostname !== "localhost" ? window.location.hostname : "34.106.12.222");
     const vncHostInput = document.getElementById("vnc-host-input");
@@ -867,10 +962,16 @@
       chatScroll.scrollTop = chatScroll.scrollHeight;
 
       try {
+        const apiKey = localStorage.getItem("syntropy_gemini_api_key");
+        const reqPayload = { text, session_id: sessionId };
+        if (apiKey && apiKey.trim()) {
+          reqPayload.api_key = apiKey.trim();
+        }
+
         const response = await fetch("/api/chat", {
           method: "POST",
           headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ text, session_id: sessionId })
+          body: JSON.stringify(reqPayload)
         });
 
         thinkingRow.remove();
@@ -964,6 +1065,7 @@
 
     // Initial check and periodic poll
     updateStatus();
+    updateKeyBadgeUI();
     initWebRtc();
     setInterval(updateStatus, 5000);
   </script>

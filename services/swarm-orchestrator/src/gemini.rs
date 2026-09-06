@@ -84,16 +84,25 @@ impl GeminiClient {
 
     /// Create client from `GEMINI_API_KEY` environment variable, falling back to Dev Mock if absent.
     pub fn from_env() -> Self {
+        let model = std::env::var("GEMINI_MODEL").unwrap_or_else(|_| "gemini-1.5-flash".to_string());
         match std::env::var("GEMINI_API_KEY") {
             Ok(key) if !key.trim().is_empty() => {
-                info!("GeminiClient: using API key from GEMINI_API_KEY environment variable");
-                Self::new(key, "gemini-flash-latest")
+                info!("GeminiClient: using API key from GEMINI_API_KEY environment variable (model: {})", model);
+                Self::new(key.trim(), model)
             }
             _ => {
                 info!("GeminiClient: no GEMINI_API_KEY found, initializing in offline Dev Mock mode");
                 Self::dev_mock()
             }
         }
+    }
+
+    /// Create client with an explicit API key and optional model override.
+    pub fn with_api_key(key: impl Into<String>, model: Option<String>) -> Self {
+        let m = model.unwrap_or_else(|| {
+            std::env::var("GEMINI_MODEL").unwrap_or_else(|_| "gemini-1.5-flash".to_string())
+        });
+        Self::new(key, m)
     }
 
     /// Returns true if running in offline Dev Mock mode.
