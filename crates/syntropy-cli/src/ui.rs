@@ -14,7 +14,7 @@ use syntropy_tunnel::{TunnelClient, TunnelConfig};
 
 const INDEX_HTML: &str = include_str!("../ui/index.html");
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, Serialize)]
 struct ChatRequest {
     text: String,
     #[serde(default)]
@@ -164,13 +164,28 @@ async fn handle_connection(
         }
 
         ("GET", "/api/status") => {
+            let vnc_ip = vnc_host.as_str();
+            let is_remote = vnc_ip != "127.0.0.1" && vnc_ip != "localhost";
+
+            if is_remote {
+                let remote_url = format!("http://{}:3000/api/status", vnc_ip);
+                if let Ok(client) = reqwest::Client::builder().timeout(Duration::from_millis(1500)).build() {
+                    if let Ok(resp) = client.get(&remote_url).send().await {
+                        if resp.status().is_success() {
+                            let bytes = resp.bytes().await.unwrap_or_default();
+                            send_http_response(&mut stream, 200, "application/json", &bytes).await?;
+                            return Ok(());
+                        }
+                    }
+                }
+            }
+
             let client = reqwest::Client::builder()
                 .danger_accept_invalid_certs(true)
                 .timeout(Duration::from_millis(800))
                 .build()
                 .ok();
 
-            let vnc_ip = vnc_host.as_str();
             let (chrome_attached, desktop_active) = if let Some(ref c) = client {
                 let chrome = c.get("http://127.0.0.1:9222/json/version").send().await.is_ok();
                 let novnc = c.get(format!("http://{}:6080", vnc_ip)).send().await.is_ok()
@@ -209,6 +224,22 @@ async fn handle_connection(
         }
 
         ("GET", "/api/audit") => {
+            let vnc_ip = vnc_host.as_str();
+            let is_remote = vnc_ip != "127.0.0.1" && vnc_ip != "localhost";
+
+            if is_remote {
+                let remote_url = format!("http://{}:3000/api/audit", vnc_ip);
+                if let Ok(client) = reqwest::Client::builder().timeout(Duration::from_millis(2000)).build() {
+                    if let Ok(resp) = client.get(&remote_url).send().await {
+                        if resp.status().is_success() {
+                            let bytes = resp.bytes().await.unwrap_or_default();
+                            send_http_response(&mut stream, 200, "application/json", &bytes).await?;
+                            return Ok(());
+                        }
+                    }
+                }
+            }
+
             let audit_path = workspace.join(".syntropy").join("audit.db");
             if !audit_path.exists() {
                 let empty_resp = json!({
@@ -249,6 +280,15 @@ async fn handle_connection(
         }
 
         ("POST", "/api/clear") => {
+            let vnc_ip = vnc_host.as_str();
+            let is_remote = vnc_ip != "127.0.0.1" && vnc_ip != "localhost";
+
+            if is_remote {
+                let remote_url = format!("http://{}:3000/api/clear", vnc_ip);
+                if let Ok(client) = reqwest::Client::builder().timeout(Duration::from_millis(2000)).build() {
+                    let _ = client.post(&remote_url).send().await;
+                }
+            }
             let resp = json!({ "status": "session_cleared" });
             send_json_response(&mut stream, 200, &resp).await?;
         }
@@ -262,6 +302,26 @@ async fn handle_connection(
                     return Ok(());
                 }
             };
+
+            let vnc_ip = vnc_host.as_str();
+            let is_remote = vnc_ip != "127.0.0.1" && vnc_ip != "localhost";
+
+            if is_remote {
+                let remote_url = format!("http://{}:3000/api/chat", vnc_ip);
+                if let Ok(client) = reqwest::Client::builder().timeout(Duration::from_secs(60)).build() {
+                    match client.post(&remote_url).json(&req).send().await {
+                        Ok(resp) => {
+                            let status = resp.status().as_u16();
+                            let bytes = resp.bytes().await.unwrap_or_default();
+                            send_http_response(&mut stream, status, "application/json", &bytes).await?;
+                            return Ok(());
+                        }
+                        Err(e) => {
+                            tracing::warn!("Failed to proxy chat to remote VNC host {}: {}, falling back to local execution", remote_url, e);
+                        }
+                    }
+                }
+            }
 
             match execute_turn_via_tunnel(&req, &workspace, &gateway_url).await {
                 Ok(resp) => {

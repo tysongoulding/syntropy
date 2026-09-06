@@ -71,8 +71,10 @@ impl AgentTurnEngine {
              You have access to tools:\n\
              - 'exec_command': run shell commands inside the virtual PTY sandbox. On Linux X11 environments, desktop automation tools like 'xdotool' (e.g. 'DISPLAY=:1 xdotool mousemove/click/type') and 'scrot' are available.\n\
              - 'apply_patch': apply atomic diffs to files.\n\
-             - 'browser_action': control Chrome over CDP. Actions: 'navigate', 'screenshot', 'get_content', 'click' (supports CSS selector or visible text/label), 'type' (types into inputs or contenteditable fields), 'press' (keyboard events e.g. 'Enter'), 'evaluate' (JavaScript).\n\
-             Always formulate valid executable commands or browser actions."
+             - 'browser_action': control Chrome over CDP. Actions: 'navigate', 'screenshot', 'get_content', 'click' (supports CSS selector or visible text/label like 'Kayla Goulding'), 'type' (types into inputs or contenteditable fields), 'press' (keyboard events e.g. 'Enter'), 'evaluate' (JavaScript).\n\
+             When instructed to send a message, search, or fill a form:\n\
+             - If Chrome is already on the target web application (e.g. Google Messages conversations), do NOT reload or navigate away; directly click the recipient (e.g. 'click' with selector 'Kayla Goulding'), 'type' the message into the message input field, and 'press' 'Enter' (or click Send).\n\
+             - Chain these actions together in your tool calls to accomplish the user's request completely in one turn."
         );
 
         let history = if !prompt.session_id.is_empty() {

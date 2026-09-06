@@ -229,18 +229,26 @@ pub async fn execute_browser_action(
                 .url
                 .as_deref()
                 .unwrap_or("https://www.google.com");
-            info!("Navigating Chrome to: {}", target_url);
+            let (_initial_title, initial_url) = get_page_info(&mut ws_stream, 100).await;
+            let is_already_on_target = !initial_url.is_empty()
+                && (initial_url == target_url
+                    || (target_url.contains("messages.google.com")
+                        && initial_url.contains("messages.google.com/web/conversations")));
 
-            // Send Page.navigate
-            let nav_req = json!({
-                "id": 1,
-                "method": "Page.navigate",
-                "params": { "url": target_url }
-            });
-            ws_stream.send(Message::Text(nav_req.to_string().into())).await?;
+            if !is_already_on_target {
+                // Send Page.navigate
+                let nav_req = json!({
+                    "id": 1,
+                    "method": "Page.navigate",
+                    "params": { "url": target_url }
+                });
+                ws_stream.send(Message::Text(nav_req.to_string().into())).await?;
 
-            // Wait briefly for navigation to process
-            tokio::time::sleep(Duration::from_millis(1500)).await;
+                // Wait briefly for navigation to process
+                tokio::time::sleep(Duration::from_millis(1500)).await;
+            } else {
+                info!("Chrome already on target URL ({}), preserving active conversation", initial_url);
+            }
 
             screenshot_base64 = capture_page_screenshot(&mut ws_stream, 2).await;
 
