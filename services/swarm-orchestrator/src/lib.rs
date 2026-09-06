@@ -126,7 +126,7 @@ mod tests {
     async fn test_gemini_live_turn_if_key_available() {
         if let Ok(key) = std::env::var("GEMINI_LIVE_TEST_KEY") {
             if !key.trim().is_empty() {
-                let client = GeminiClient::new(key, "gemini-2.5-flash");
+                let client = GeminiClient::new(key, "gemini-flash-latest");
                 let res = client
                     .generate_turn("Reply with the exact word PONG and nothing else.", None, &[])
                     .await;

@@ -7,13 +7,12 @@ use tracing_subscriber::FmtSubscriber;
 
 use syntropy_daemon::{AppConfig, DaemonService};
 use syntropy_exec::{AtomicPatchApplicator, PatchOptions, PtyMultiplexer, SpawnOptions, WorkspaceJail};
-use syntropy_orchestrator::{AgentTurnEngine, GeminiClient};
 use syntropy_proto::tunnel::{
     self, ApplyPatch, ApprovalRequest, ExecCommand, McpInvokeRequest,
     TunnelServerFrame, UserPrompt,
 };
 use syntropy_security::{CredentialBroker, KeyStore, MerkleAuditLedger, OAuthSession};
-use syntropy_tunnel::MockGatewayServer;
+use syntropy_tunnel::{MockGatewayServer, TunnelClient, TunnelConfig};
 
 #[derive(Parser)]
 #[command(name = "syntropy")]
@@ -43,17 +42,13 @@ enum Commands {
         /// Instruction or query to send to the swarm
         text: String,
 
-        /// Run in offline dev-mock mode without network calls or API usage
+        /// Run in offline dev-mock mode without network calls or cloud connection
         #[arg(long, default_value = "false")]
         dev: bool,
 
-        /// Model identifier (defaults to gemini-flash-latest)
-        #[arg(short, long, default_value = "gemini-flash-latest")]
-        model: String,
-
-        /// Explicit API key override (defaults to hardware keystore or GEMINI_API_KEY)
+        /// Gateway server URL (e.g. http://127.0.0.1:50051)
         #[arg(short, long)]
-        api_key: Option<String>,
+        server_url: Option<String>,
     },
 
     /// Start the background daemon service and connect to the agent gateway
@@ -91,17 +86,7 @@ enum AuthCommands {
     },
     /// Inspect active hardware-sealed OAuth session status
     Status,
-    /// Store an external API key (e.g. Gemini) in the hardware keystore
-    SetKey {
-        /// Provider name (e.g. gemini, anthropic, openai)
-        #[arg(short, long, default_value = "gemini")]
-        provider: String,
-
-        /// Secret API key to securely seal in keystore
-        #[arg(short, long)]
-        key: String,
-    },
-    /// Inspect configured API keys without revealing secrets
+    /// Inspect active sealed credentials
     ShowKeys,
     /// Clear and purge active credentials from the keystore
     Logout,
@@ -170,21 +155,12 @@ async fn main() -> Result<(), anyhow::Error> {
                         }
                     }
                 }
-                AuthCommands::SetKey { provider, key } => {
-                    let store_key = format!("syntropy:llm:{}", provider.to_lowercase());
-                    keystore.set(&store_key, key.as_bytes())?;
-                    println!("🔐 Secret key for '{}' successfully sealed in hardware keystore.", provider);
-                }
                 AuthCommands::ShowKeys => {
                     let keys = keystore.list()?;
                     println!("🔑 Sealed Keystore Entries:");
                     let mut found = false;
                     for k in keys {
-                        if k.starts_with("syntropy:llm:") {
-                            let prov = k.trim_start_matches("syntropy:llm:");
-                            println!("   - LLM Provider: {} [SEALED]", prov);
-                            found = true;
-                        } else if k == "syntropy:oauth_session" {
+                        if k == "syntropy:oauth_session" {
                             println!("   - Single-Host OAuth Session [SEALED]");
                             found = true;
                         }
@@ -195,42 +171,34 @@ async fn main() -> Result<(), anyhow::Error> {
                 }
                 AuthCommands::Logout => {
                     broker.clear_oauth_session()?;
+                    let _ = keystore.delete("syntropy:llm:gemini");
                     println!("🚪 Logged out. Active credentials purged from keystore.");
                 }
             }
         }
 
-        Commands::Prompt { text, dev, model, api_key } => {
-            #[cfg(target_os = "windows")]
-            let keystore: Arc<dyn KeyStore> = match syntropy_security::DpapiKeyStore::new() {
-                Ok(ks) => Arc::new(ks),
-                Err(_) => Arc::new(syntropy_security::InMemoryKeyStore::new()),
-            };
-            #[cfg(not(target_os = "windows"))]
-            let keystore: Arc<dyn KeyStore> = Arc::new(syntropy_security::InMemoryKeyStore::new());
-
-            let effective_key = if dev {
-                None
-            } else if let Some(k) = api_key {
-                Some(k)
-            } else if let Ok(Some(bytes)) = keystore.get("syntropy:llm:gemini") {
-                String::from_utf8(bytes).ok()
+        Commands::Prompt { text, dev, server_url } => {
+            let (_mock_server, target_url) = if dev {
+                let s = MockGatewayServer::start().await?;
+                let url = s.url();
+                (Some(s), url)
             } else {
-                std::env::var("GEMINI_API_KEY").ok()
+                let url = server_url.unwrap_or_else(|| config.daemon.server_url.clone());
+                (None, url)
             };
 
-            let client = match effective_key {
-                Some(key) if !dev && !key.trim().is_empty() => {
-                    println!("🌐 Connecting to Cloud Swarm with Gemini API (Model: {})...", model);
-                    GeminiClient::new(key, model)
-                }
-                _ => {
-                    println!("🛠️ Running turn in Dev Mock mode (Model: {}-dev-mock)...", model);
-                    GeminiClient::dev_mock()
+            println!("🌐 Connecting to Cloud Swarm Gateway at {}...", target_url);
+            let tunnel_cfg = TunnelConfig::new(&target_url, "local-cli-agent")
+                .with_connect_timeout(Duration::from_secs(5));
+            let mut client = match TunnelClient::connect(tunnel_cfg).await {
+                Ok(c) => c,
+                Err(e) => {
+                    eprintln!("❌ Failed to connect to Cloud Gateway at {}: {}", target_url, e);
+                    eprintln!("   Hint: Ensure 'syntropy-gateway' is running on the Cloud side, or run with '--dev' for offline mode.");
+                    return Ok(());
                 }
             };
 
-            let engine = AgentTurnEngine::new(Arc::new(client));
             let prompt = UserPrompt {
                 prompt_id: format!("prompt-{}", uuid::Uuid::new_v4()),
                 text: text.clone(),
@@ -238,72 +206,142 @@ async fn main() -> Result<(), anyhow::Error> {
                 context_files: Default::default(),
             };
 
+            let prompt_frame = syntropy_proto::tunnel::TunnelClientFrame {
+                frame_id: uuid::Uuid::new_v4().to_string(),
+                agent_id: "local-cli-agent".into(),
+                timestamp_unix_ms: chrono::Utc::now().timestamp_millis(),
+                payload: Some(syntropy_proto::tunnel::tunnel_client_frame::Payload::UserPrompt(prompt)),
+            };
+
             println!("📤 User Prompt: \"{}\"", text);
-            let plan = engine.process_prompt(&prompt, "local-cli-agent").await?;
+            client.send(prompt_frame).await?;
 
-            println!("\n🤖 Swarm Response:\n{}", plan.agent_message.content);
+            let jail = WorkspaceJail::new(&workspace_root)?;
+            let pty_mux = PtyMultiplexer::new();
+            let diff_app = AtomicPatchApplicator::new();
+            let audit_path = config.resolve_audit_path(&workspace_root);
+            if let Some(p) = audit_path.parent() {
+                let _ = std::fs::create_dir_all(p);
+            }
+            let ledger = MerkleAuditLedger::open(&audit_path)?;
 
-            if !plan.agent_message.tool_calls.is_empty() {
-                println!("\n🔧 Dispatched Tool Actions: {:?}", plan.agent_message.tool_calls);
-                let jail = WorkspaceJail::new(&workspace_root)?;
-                let pty_mux = PtyMultiplexer::new();
-                let diff_app = AtomicPatchApplicator::new();
-                let audit_path = config.resolve_audit_path(&workspace_root);
-                if let Some(p) = audit_path.parent() {
-                    let _ = std::fs::create_dir_all(p);
-                }
-                let ledger = MerkleAuditLedger::open(&audit_path)?;
+            let turn_timeout = tokio::time::Instant::now() + Duration::from_secs(60);
+            while tokio::time::Instant::now() < turn_timeout {
+                let server_frame = match tokio::time::timeout(Duration::from_secs(15), client.recv()).await {
+                    Ok(Some(f)) => f,
+                    Ok(None) => break,
+                    Err(_) => {
+                        break;
+                    }
+                };
 
-                for frame in plan.server_frames_to_send {
-                    if let Some(payload) = frame.payload {
-                        match payload {
-                            tunnel::tunnel_server_frame::Payload::ExecCommand(cmd) => {
-                                #[cfg(windows)]
-                                let (final_command, final_args) = if cmd.command == "ls" {
-                                    ("cmd.exe".to_string(), vec!["/c".to_string(), "dir".to_string()])
-                                } else {
-                                    (cmd.command.clone(), cmd.args.clone())
-                                };
-                                #[cfg(not(windows))]
-                                let (final_command, final_args) = (cmd.command.clone(), cmd.args.clone());
-
-                                println!("\n▶️ [Virtual PTY] Executing: {} {:?}", final_command, final_args);
-                                let cwd_path = if cmd.working_dir.is_empty() { None } else { Some(std::path::Path::new(&cmd.working_dir)) };
-                                let target_cwd = jail.validate_cwd(cwd_path)?;
-
-                                let mut spawn_opts = SpawnOptions::new(&final_command)
-                                    .args(final_args)
-                                    .cwd(target_cwd)
-                                    .pty(cmd.pty);
-                                if cmd.pty && cmd.pty_rows > 0 && cmd.pty_cols > 0 {
-                                    spawn_opts = spawn_opts.dimensions(cmd.pty_rows as u16, cmd.pty_cols as u16);
-                                }
-
-                                let mut rx = pty_mux.spawn_screen("cli-screen", spawn_opts)?;
-                                let mut full_output = Vec::new();
-                                while let Ok(chunk) = rx.recv().await {
-                                    print!("{}", String::from_utf8_lossy(&chunk.data));
-                                    full_output.extend_from_slice(&chunk.data);
-                                    if chunk.is_eof {
-                                        break;
-                                    }
-                                }
-                                ledger.append("local-cli-agent", "exec_command", &full_output)?;
-                                println!("   ✓ Execution complete. SHA-256 appended to Merkle ledger.");
+                if let Some(payload) = server_frame.payload {
+                    match payload {
+                        syntropy_proto::tunnel::tunnel_server_frame::Payload::AgentMessage(msg) => {
+                            if !msg.content.trim().is_empty() {
+                                println!("\n🤖 Swarm Response:\n{}", msg.content);
                             }
-                            tunnel::tunnel_server_frame::Payload::ApplyPatch(patch) => {
-                                println!("\n▶️ [Atomic Patch] Applying diff to: {}", patch.file_path);
-                                let target_path = jail.resolve_path(&patch.file_path)?;
-                                let opts = PatchOptions::new().dry_run(patch.dry_run);
-                                let result = diff_app.apply_patch(&target_path, &patch.diff, opts)?;
-                                ledger.append("local-cli-agent", "apply_patch", patch.diff.as_bytes())?;
-                                println!(
-                                    "   ✓ Patch applied ({} lines added, {} lines removed). Merkle ledger updated.",
-                                    result.lines_added, result.lines_removed
-                                );
+                            if !msg.tool_calls.is_empty() {
+                                println!("\n🔧 Dispatched Tool Actions: {:?}", msg.tool_calls);
                             }
-                            _ => {}
+                            if msg.is_final {
+                                break;
+                            }
                         }
+                        syntropy_proto::tunnel::tunnel_server_frame::Payload::ExecCommand(cmd) => {
+                            #[cfg(windows)]
+                            let (final_command, final_args) = if cmd.command == "ls" {
+                                ("cmd.exe".to_string(), vec!["/c".to_string(), "dir".to_string()])
+                            } else {
+                                (cmd.command.clone(), cmd.args.clone())
+                            };
+                            #[cfg(not(windows))]
+                            let (final_command, final_args) = (cmd.command.clone(), cmd.args.clone());
+
+                            println!("\n▶️ [Virtual PTY] Executing: {} {:?}", final_command, final_args);
+                            let cwd_path = if cmd.working_dir.is_empty() { None } else { Some(std::path::Path::new(&cmd.working_dir)) };
+                            let target_cwd = jail.validate_cwd(cwd_path)?;
+
+                            let mut spawn_opts = SpawnOptions::new(&final_command)
+                                .args(final_args)
+                                .cwd(target_cwd)
+                                .pty(cmd.pty);
+                            if cmd.pty && cmd.pty_rows > 0 && cmd.pty_cols > 0 {
+                                spawn_opts = spawn_opts.dimensions(cmd.pty_rows as u16, cmd.pty_cols as u16);
+                            }
+
+                            let mut rx = pty_mux.spawn_screen("cli-screen", spawn_opts)?;
+                            let mut full_output = Vec::new();
+                            while let Ok(chunk) = rx.recv().await {
+                                print!("{}", String::from_utf8_lossy(&chunk.data));
+                                full_output.extend_from_slice(&chunk.data);
+                                if chunk.is_eof {
+                                    break;
+                                }
+                            }
+                            ledger.append("local-cli-agent", "exec_command", &full_output)?;
+                            println!("   ✓ Execution complete. SHA-256 appended to Merkle ledger.");
+
+                            let out_frame = syntropy_proto::tunnel::TunnelClientFrame {
+                                frame_id: uuid::Uuid::new_v4().to_string(),
+                                agent_id: "local-cli-agent".into(),
+                                timestamp_unix_ms: chrono::Utc::now().timestamp_millis(),
+                                payload: Some(syntropy_proto::tunnel::tunnel_client_frame::Payload::TerminalOutput(
+                                    syntropy_proto::tunnel::TerminalOutputChunk {
+                                        session_id: "cli-screen".into(),
+                                        data: full_output,
+                                        is_stderr: false,
+                                        is_eof: true,
+                                        exit_code: 0,
+                                    },
+                                )),
+                            };
+                            let _ = client.send(out_frame).await;
+                        }
+                        syntropy_proto::tunnel::tunnel_server_frame::Payload::ApplyPatch(patch) => {
+                            println!("\n▶️ [Atomic Patch] Applying diff to: {}", patch.file_path);
+                            let target_path = jail.resolve_path(&patch.file_path)?;
+                            let opts = PatchOptions::new().dry_run(patch.dry_run);
+                            let result = diff_app.apply_patch(&target_path, &patch.diff, opts);
+
+                            let (success, err_msg, lines_added, lines_removed) = match result {
+                                Ok(res) => {
+                                    ledger.append("local-cli-agent", "apply_patch", patch.diff.as_bytes())?;
+                                    println!(
+                                        "   ✓ Patch applied ({} lines added, {} lines removed). Merkle ledger updated.",
+                                        res.lines_added, res.lines_removed
+                                    );
+                                    (true, String::new(), res.lines_added, res.lines_removed)
+                                }
+                                Err(e) => {
+                                    eprintln!("   ❌ Patch failed: {}", e);
+                                    (false, e.to_string(), 0, 0)
+                                }
+                            };
+
+                            let patch_res_frame = syntropy_proto::tunnel::TunnelClientFrame {
+                                frame_id: uuid::Uuid::new_v4().to_string(),
+                                agent_id: "local-cli-agent".into(),
+                                timestamp_unix_ms: chrono::Utc::now().timestamp_millis(),
+                                payload: Some(syntropy_proto::tunnel::tunnel_client_frame::Payload::PatchResult(
+                                    syntropy_proto::tunnel::PatchResult {
+                                        patch_id: patch.patch_id.clone(),
+                                        file_path: patch.file_path.clone(),
+                                        success,
+                                        error_message: err_msg,
+                                        new_sha256: String::new(),
+                                        lines_added,
+                                        lines_removed,
+                                    },
+                                )),
+                            };
+                            let _ = client.send(patch_res_frame).await;
+                        }
+                        syntropy_proto::tunnel::tunnel_server_frame::Payload::ErrorFrame(err) => {
+                            eprintln!("\n❌ Cloud Gateway Error: {}", err);
+                            break;
+                        }
+                        _ => {}
                     }
                 }
             }

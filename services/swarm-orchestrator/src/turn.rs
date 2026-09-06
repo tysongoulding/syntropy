@@ -118,7 +118,7 @@ impl AgentTurnEngine {
             turn_id: format!("turn-{}", uuid::Uuid::new_v4()),
             content: result.content,
             tool_calls: tool_names,
-            is_final: server_frames.is_empty(),
+            is_final: true,
         };
 
         // Always include the AgentMessage frame

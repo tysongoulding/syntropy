@@ -7,6 +7,7 @@ use tonic::transport::Server;
 use syntropy_proto::tunnel::agent_tunnel_service_server::AgentTunnelServiceServer;
 use syntropy_proto::tunnel::TunnelClientFrame;
 
+use syntropy_orchestrator::{AgentTurnEngine, GeminiClient};
 use crate::service::GatewayTunnelService;
 use crate::session::SessionRegistry;
 
@@ -19,20 +20,35 @@ pub struct GatewayServerHandle {
 }
 
 impl GatewayServerHandle {
-    /// Binds an ephemeral local TCP port (`127.0.0.1:0`) and starts the gateway service.
+    /// Binds an ephemeral local TCP port (`127.0.0.1:0`) and starts the gateway service with default turn engine.
     pub async fn bind_ephemeral() -> Result<Self, anyhow::Error> {
-        Self::bind("127.0.0.1:0").await
+        let gemini = Arc::new(GeminiClient::from_env());
+        let engine = Arc::new(AgentTurnEngine::new(gemini));
+        Self::bind_with_engine("127.0.0.1:0", Some(engine)).await
     }
 
-    /// Binds to a specific address and starts the gateway service.
+    /// Binds to a specific address and starts the gateway service with default turn engine.
     pub async fn bind(addr_str: &str) -> Result<Self, anyhow::Error> {
+        let gemini = Arc::new(GeminiClient::from_env());
+        let engine = Arc::new(AgentTurnEngine::new(gemini));
+        Self::bind_with_engine(addr_str, Some(engine)).await
+    }
+
+    /// Binds to an address with an optional explicit turn engine.
+    pub async fn bind_with_engine(
+        addr_str: &str,
+        turn_engine: Option<Arc<AgentTurnEngine>>,
+    ) -> Result<Self, anyhow::Error> {
         let listener = tokio::net::TcpListener::bind(addr_str).await?;
         let addr = listener.local_addr()?;
         let stream = TcpListenerStream::new(listener);
 
         let registry = Arc::new(SessionRegistry::new());
         let (client_frame_tx, client_frame_rx) = mpsc::channel(256);
-        let service = GatewayTunnelService::new(registry.clone(), Some(client_frame_tx));
+        let mut service = GatewayTunnelService::new(registry.clone(), Some(client_frame_tx));
+        if let Some(engine) = turn_engine {
+            service = service.with_turn_engine(engine);
+        }
 
         let (shutdown_tx, mut shutdown_rx) = watch::channel(false);
 

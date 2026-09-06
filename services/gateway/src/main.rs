@@ -6,6 +6,7 @@ use tracing::{info, Level};
 use tracing_subscriber::FmtSubscriber;
 
 use syntropy_gateway::{GatewayTunnelService, SessionRegistry};
+use syntropy_orchestrator::{AgentTurnEngine, GeminiClient};
 use syntropy_proto::tunnel::agent_tunnel_service_server::AgentTunnelServiceServer;
 
 #[derive(Parser, Debug)]
@@ -29,7 +30,10 @@ async fn main() -> Result<(), anyhow::Error> {
 
     let addr: SocketAddr = args.bind.parse()?;
     let registry = Arc::new(SessionRegistry::new());
-    let service = GatewayTunnelService::new(registry.clone(), None);
+    let gemini = Arc::new(GeminiClient::from_env());
+    let turn_engine = Arc::new(AgentTurnEngine::new(gemini));
+    let service = GatewayTunnelService::new(registry.clone(), None)
+        .with_turn_engine(turn_engine);
 
     info!("🚀 Syntropy Cloud Gateway starting on {}", addr);
 

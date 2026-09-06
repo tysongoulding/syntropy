@@ -10,11 +10,13 @@ use syntropy_proto::tunnel::{
     self, agent_tunnel_service_server::AgentTunnelService, TunnelClientFrame, TunnelServerFrame,
 };
 
+use syntropy_orchestrator::AgentTurnEngine;
 use crate::session::SessionRegistry;
 
 pub struct GatewayTunnelService {
     registry: Arc<SessionRegistry>,
     client_frame_tx: Option<mpsc::Sender<TunnelClientFrame>>,
+    turn_engine: Option<Arc<AgentTurnEngine>>,
 }
 
 impl GatewayTunnelService {
@@ -25,7 +27,13 @@ impl GatewayTunnelService {
         Self {
             registry,
             client_frame_tx,
+            turn_engine: None,
         }
+    }
+
+    pub fn with_turn_engine(mut self, engine: Arc<AgentTurnEngine>) -> Self {
+        self.turn_engine = Some(engine);
+        self
     }
 }
 
@@ -48,6 +56,7 @@ impl AgentTunnelService for GatewayTunnelService {
 
         let registry = self.registry.clone();
         let event_tx = self.client_frame_tx.clone();
+        let turn_engine = self.turn_engine.clone();
 
         tokio::spawn(async move {
             let mut current_agent_id = metadata_agent_id;
@@ -85,7 +94,37 @@ impl AgentTunnelService for GatewayTunnelService {
 
                 // Forward incoming client frame to swarm orchestrator queue if configured
                 if let Some(ref tx) = event_tx {
-                    let _ = tx.send(client_frame).await;
+                    let _ = tx.send(client_frame.clone()).await;
+                }
+
+                // Handle UserPrompt on the Cloud side (Zero API Key Leakage to client)
+                if let Some(tunnel::tunnel_client_frame::Payload::UserPrompt(ref prompt)) = client_frame.payload {
+                    if let Some(ref engine) = turn_engine {
+                        let prompt_clone = prompt.clone();
+                        let target_agent = agent_id.clone();
+                        let tx = out_tx.clone();
+                        let eng = engine.clone();
+
+                        tokio::spawn(async move {
+                            match eng.process_prompt(&prompt_clone, &target_agent).await {
+                                Ok(plan) => {
+                                    for frame in plan.server_frames_to_send {
+                                        let _ = tx.send(Ok(frame)).await;
+                                    }
+                                }
+                                Err(e) => {
+                                    let err_msg = TunnelServerFrame {
+                                        frame_id: uuid::Uuid::new_v4().to_string(),
+                                        timestamp_unix_ms: chrono::Utc::now().timestamp_millis(),
+                                        payload: Some(tunnel::tunnel_server_frame::Payload::ErrorFrame(
+                                            format!("Cloud Turn Error: {}", e),
+                                        )),
+                                    };
+                                    let _ = tx.send(Ok(err_msg)).await;
+                                }
+                            }
+                        });
+                    }
                 }
             }
 

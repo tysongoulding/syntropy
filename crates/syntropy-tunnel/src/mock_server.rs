@@ -10,7 +10,8 @@ use tracing::{debug, info};
 
 use syntropy_proto::tunnel::{
     agent_tunnel_service_server::{AgentTunnelService, AgentTunnelServiceServer},
-    tunnel_client_frame, tunnel_server_frame, Heartbeat, TunnelClientFrame, TunnelServerFrame,
+    tunnel_client_frame, tunnel_server_frame, AgentMessage, ApplyPatch, ExecCommand, Heartbeat,
+    TunnelClientFrame, TunnelServerFrame,
 };
 
 use crate::error::{Result, TunnelError};
@@ -80,6 +81,64 @@ impl AgentTunnelService for MockTunnelServiceImpl {
                             let _ = ack_sender.send(Ok(ack_frame)).await;
                         }
                     }
+                }
+
+                // Auto-handle UserPrompt in mock mode
+                if let Some(tunnel_client_frame::Payload::UserPrompt(ref prompt)) = client_frame.payload {
+                    let p_lower = prompt.text.to_lowercase();
+                    let prompt_text = prompt.text.clone();
+                    let responder = ack_sender.clone();
+
+                    tokio::spawn(async move {
+                        if p_lower.contains("patch") || p_lower.contains("edit") {
+                            let patch = ApplyPatch {
+                                patch_id: format!("patch-{}", uuid::Uuid::new_v4()),
+                                file_path: "mock_patch.txt".into(),
+                                diff: "@@ -0,0 +1,1 @@\n+Mock patch content\n".into(),
+                                expected_sha256: String::new(),
+                                dry_run: false,
+                            };
+                            let _ = responder.send(Ok(TunnelServerFrame {
+                                frame_id: uuid::Uuid::new_v4().to_string(),
+                                timestamp_unix_ms: chrono::Utc::now().timestamp_millis(),
+                                payload: Some(tunnel_server_frame::Payload::ApplyPatch(patch)),
+                            })).await;
+                        } else {
+                            #[cfg(windows)]
+                            let (cmd, args) = ("cmd.exe".to_string(), vec!["/c".to_string(), "dir".to_string()]);
+                            #[cfg(not(windows))]
+                            let (cmd, args) = ("sh".to_string(), vec!["-c".to_string(), "ls -la".to_string()]);
+
+                            let exec = ExecCommand {
+                                command_id: format!("cmd-{}", uuid::Uuid::new_v4()),
+                                command: cmd,
+                                args,
+                                working_dir: String::new(),
+                                env: std::collections::HashMap::new(),
+                                timeout_seconds: 15,
+                                pty: true,
+                                pty_rows: 24,
+                                pty_cols: 80,
+                            };
+                            let _ = responder.send(Ok(TunnelServerFrame {
+                                frame_id: uuid::Uuid::new_v4().to_string(),
+                                timestamp_unix_ms: chrono::Utc::now().timestamp_millis(),
+                                payload: Some(tunnel_server_frame::Payload::ExecCommand(exec)),
+                            })).await;
+                        }
+
+                        let agent_msg = AgentMessage {
+                            turn_id: format!("turn-{}", uuid::Uuid::new_v4()),
+                            content: format!("Syntropy Mock Gateway: Swarm executed turn for prompt: '{}'", prompt_text),
+                            tool_calls: vec!["exec_command".into()],
+                            is_final: true,
+                        };
+                        let _ = responder.send(Ok(TunnelServerFrame {
+                            frame_id: uuid::Uuid::new_v4().to_string(),
+                            timestamp_unix_ms: chrono::Utc::now().timestamp_millis(),
+                            payload: Some(tunnel_server_frame::Payload::AgentMessage(agent_msg)),
+                        })).await;
+                    });
                 }
 
                 // Forward to test receiver

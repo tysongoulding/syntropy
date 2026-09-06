@@ -151,3 +151,70 @@ async fn test_cloud_service_communicates_with_application_crates() {
     gateway.shutdown();
     let _ = std::fs::remove_dir_all(&temp_dir);
 }
+
+#[tokio::test]
+async fn test_cloud_gateway_evaluates_user_prompt_and_returns_tool_frames() {
+    // 1. Bind ephemeral gateway with dev_mock turn engine
+    let gemini = Arc::new(syntropy_orchestrator::GeminiClient::dev_mock());
+    let engine = Arc::new(syntropy_orchestrator::AgentTurnEngine::new(gemini));
+    let gateway = Arc::new(
+        GatewayServerHandle::bind_with_engine("127.0.0.1:0", Some(engine))
+            .await
+            .expect("Failed to bind ephemeral gateway"),
+    );
+
+    // 2. Connect TunnelClient from application track (zero API key on client)
+    let tunnel_cfg = syntropy_tunnel::TunnelConfig::new(gateway.url(), "prompt-test-agent")
+        .with_connect_timeout(Duration::from_secs(5));
+    let mut client = syntropy_tunnel::TunnelClient::connect(tunnel_cfg)
+        .await
+        .expect("TunnelClient failed to connect");
+
+    // 3. Send UserPrompt frame
+    let prompt_frame = syntropy_proto::tunnel::TunnelClientFrame {
+        frame_id: uuid::Uuid::new_v4().to_string(),
+        agent_id: "prompt-test-agent".into(),
+        timestamp_unix_ms: chrono::Utc::now().timestamp_millis(),
+        payload: Some(syntropy_proto::tunnel::tunnel_client_frame::Payload::UserPrompt(
+            syntropy_proto::tunnel::UserPrompt {
+                prompt_id: "test-prompt-1".into(),
+                text: "List files in directory".into(),
+                session_id: "test-session-1".into(),
+                context_files: Default::default(),
+            },
+        )),
+    };
+    client.send(prompt_frame).await.expect("Failed to send prompt frame");
+
+    // 4. Client receives frames dispatched from Cloud Turn Engine
+    let mut received_exec = false;
+    let mut received_agent_msg = false;
+
+    let timeout = tokio::time::Instant::now() + Duration::from_secs(5);
+    while tokio::time::Instant::now() < timeout {
+        if let Ok(Some(frame)) = tokio::time::timeout(Duration::from_millis(500), client.recv()).await {
+            if let Some(payload) = frame.payload {
+                match payload {
+                    tunnel_server_frame::Payload::ExecCommand(cmd) => {
+                        assert!(!cmd.command.is_empty());
+                        received_exec = true;
+                    }
+                    tunnel_server_frame::Payload::AgentMessage(msg) => {
+                        assert!(msg.is_final);
+                        assert_eq!(msg.tool_calls, vec!["exec_command"]);
+                        received_agent_msg = true;
+                    }
+                    _ => {}
+                }
+            }
+            if received_exec && received_agent_msg {
+                break;
+            }
+        }
+    }
+
+    assert!(received_exec, "Client did not receive ExecCommand from Cloud Turn Engine");
+    assert!(received_agent_msg, "Client did not receive AgentMessage from Cloud Turn Engine");
+
+    gateway.shutdown();
+}
