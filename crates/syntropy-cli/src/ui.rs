@@ -144,11 +144,19 @@ async fn handle_connection(
         }
 
         ("GET", "/api/status") => {
-            let client = reqwest::Client::builder().timeout(Duration::from_millis(500)).build().ok();
-            let chrome_attached = if let Some(c) = client {
-                c.get("http://127.0.0.1:9222/json/version").send().await.is_ok()
+            let client = reqwest::Client::builder()
+                .danger_accept_invalid_certs(true)
+                .timeout(Duration::from_millis(500))
+                .build()
+                .ok();
+
+            let (chrome_attached, kasm_active) = if let Some(ref c) = client {
+                let chrome = c.get("http://127.0.0.1:9222/json/version").send().await.is_ok();
+                let kasm = c.get("https://127.0.0.1:8444").send().await.is_ok()
+                    || c.get("http://127.0.0.1:8444").send().await.is_ok();
+                (chrome, kasm)
             } else {
-                false
+                (false, false)
             };
 
             let body = json!({
@@ -157,7 +165,8 @@ async fn handle_connection(
                 "os": std::env::consts::OS,
                 "arch": std::env::consts::ARCH,
                 "status": "online",
-                "chrome_attached": chrome_attached
+                "chrome_attached": chrome_attached,
+                "kasm_active": kasm_active
             });
             send_json_response(&mut stream, 200, &body).await?;
         }

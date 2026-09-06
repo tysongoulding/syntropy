@@ -412,6 +412,12 @@
       font-family: monospace;
       font-size: 0.8rem;
     }
+    .modal-wide {
+      max-width: 95vw;
+      width: 1400px;
+      height: 88vh;
+      max-height: 88vh;
+    }
   </style>
 </head>
 <body>
@@ -439,6 +445,11 @@
       <div class="badge" id="webrtc-badge" title="WebRTC DataChannel Status">
         <span>⚡</span>
         <span id="webrtc-label">WebRTC: Initializing...</span>
+      </div>
+
+      <div class="badge" id="kasm-badge" title="Click to view & take over KasmVNC Cloud Desktop" style="cursor:pointer;">
+        <span>🖥️</span>
+        <span id="kasm-label">KasmVNC Desktop</span>
       </div>
 
       <div class="badge" id="audit-badge" title="Click to view SQLite Merkle Audit Ledger">
@@ -498,6 +509,42 @@
     </div>
   </div>
 
+  <!-- KasmVNC Desktop Modal -->
+  <div class="modal-backdrop" id="kasm-modal">
+    <div class="modal modal-wide" id="kasm-modal-container">
+      <div class="modal-header">
+        <div style="display: flex; align-items: center; gap: 10px;">
+          <h3 style="margin: 0; font-size: 1rem;">🖥️ KasmVNC Cloud Desktop (WebRTC)</h3>
+          <span style="font-size: 0.72rem; color: #3fb950; background: rgba(63, 185, 80, 0.1); padding: 2px 8px; border-radius: 12px; border: 1px solid rgba(63, 185, 80, 0.3);">Real-Time Takeover</span>
+        </div>
+        <div style="display: flex; align-items: center; gap: 8px;">
+          <input type="text" id="kasm-url-input" value="https://127.0.0.1:8444" placeholder="KasmVNC URL (https://<host>:8444)" style="background: var(--surface-hover); border: 1px solid var(--surface-border); color: var(--text); padding: 5px 10px; border-radius: 6px; font-size: 0.8rem; width: 220px;" />
+          <button class="btn" id="kasm-connect-btn" style="padding: 5px 12px; font-size: 0.8rem;">Connect</button>
+          <button class="btn" id="kasm-open-tab-btn" title="Open in new browser tab" style="padding: 5px 10px; font-size: 0.8rem;">↗ Tab</button>
+          <button class="btn" id="kasm-fullscreen-btn" title="Toggle Fullscreen" style="padding: 5px 10px; font-size: 0.8rem;">⛶ Fullscreen</button>
+          <button class="btn" onclick="closeKasmModal()" style="padding: 5px 12px; font-size: 0.8rem;">✕</button>
+        </div>
+      </div>
+      <div class="modal-body" style="padding: 0; display: flex; flex-direction: column; flex: 1; background: #000; overflow: hidden; position: relative;">
+        <iframe id="kasm-iframe" src="" allow="clipboard-read; clipboard-write; fullscreen; camera; microphone" style="display: none; width: 100%; height: 100%; border: none; flex: 1; min-height: 520px;"></iframe>
+        <div id="kasm-placeholder" style="display: flex; flex-direction: column; align-items: center; justify-content: center; height: 100%; min-height: 520px; color: var(--text-muted); text-align: center; padding: 24px;">
+          <div style="font-size: 3.2rem; margin-bottom: 12px;">🖥️</div>
+          <h4 style="color: var(--text); margin-bottom: 8px; font-size: 1.1rem;">KasmVNC WebRTC Desktop Session</h4>
+          <p style="max-width: 520px; font-size: 0.85rem; line-height: 1.5; margin-bottom: 18px; color: var(--text-muted);">
+            Streams the cloud or local VM desktop with sub-30ms WebRTC latency. You can watch the autonomous agent move and click, or take over with your mouse and keyboard at any moment.
+          </p>
+          <div style="display: flex; gap: 10px;">
+            <button class="btn" onclick="connectKasmIframe()" style="background: var(--primary); color: white; border-color: var(--primary); padding: 8px 18px;">Connect Desktop Session</button>
+            <button class="btn" onclick="window.open(document.getElementById('kasm-url-input').value, '_blank')" style="padding: 8px 18px;">Open in New Tab</button>
+          </div>
+          <p style="font-size: 0.75rem; color: var(--text-muted); margin-top: 20px;">
+            💡 <em>Note: If your KasmVNC instance uses a self-signed TLS certificate, click <strong>"Open in New Tab"</strong> once to accept the certificate.</em>
+          </p>
+        </div>
+      </div>
+    </div>
+  </div>
+
   <script>
     let sessionId = "session-" + Math.random().toString(36).substring(2, 10);
     const chatScroll = document.getElementById("chat-scroll");
@@ -515,6 +562,55 @@
     const chromeBadge = document.getElementById("chrome-badge");
     const webrtcLabel = document.getElementById("webrtc-label");
     const webrtcBadge = document.getElementById("webrtc-badge");
+    const kasmBadge = document.getElementById("kasm-badge");
+    const kasmLabel = document.getElementById("kasm-label");
+    const kasmModal = document.getElementById("kasm-modal");
+    const kasmIframe = document.getElementById("kasm-iframe");
+    const kasmPlaceholder = document.getElementById("kasm-placeholder");
+    const kasmUrlInput = document.getElementById("kasm-url-input");
+    const kasmConnectBtn = document.getElementById("kasm-connect-btn");
+    const kasmOpenTabBtn = document.getElementById("kasm-open-tab-btn");
+    const kasmFullscreenBtn = document.getElementById("kasm-fullscreen-btn");
+
+    const savedKasmUrl = localStorage.getItem("syntropy_kasm_url");
+    if (savedKasmUrl) {
+      kasmUrlInput.value = savedKasmUrl;
+    }
+
+    kasmBadge.addEventListener("click", () => {
+      kasmModal.style.display = "flex";
+      if (!kasmIframe.src || kasmIframe.src === "" || kasmIframe.src === "about:blank") {
+        connectKasmIframe();
+      }
+    });
+
+    function closeKasmModal() {
+      kasmModal.style.display = "none";
+    }
+
+    function connectKasmIframe() {
+      const url = kasmUrlInput.value.trim() || "https://127.0.0.1:8444";
+      localStorage.setItem("syntropy_kasm_url", url);
+      kasmPlaceholder.style.display = "none";
+      kasmIframe.style.display = "block";
+      kasmIframe.src = url;
+    }
+
+    kasmConnectBtn.addEventListener("click", connectKasmIframe);
+
+    kasmOpenTabBtn.addEventListener("click", () => {
+      const url = kasmUrlInput.value.trim() || "https://127.0.0.1:8444";
+      window.open(url, "_blank");
+    });
+
+    kasmFullscreenBtn.addEventListener("click", () => {
+      const container = document.getElementById("kasm-modal-container");
+      if (!document.fullscreenElement) {
+        container.requestFullscreen().catch(() => {});
+      } else {
+        document.exitFullscreen().catch(() => {});
+      }
+    });
 
     // Auto-resize input
     promptInput.addEventListener("input", () => {
@@ -567,6 +663,14 @@
           } else {
             chromeLabel.innerText = "Chrome: Offline";
             chromeBadge.style.borderColor = "var(--surface-border)";
+          }
+
+          if (data.kasm_active) {
+            kasmLabel.innerText = "KasmVNC: Connected (Port 8444)";
+            kasmBadge.style.borderColor = "#3fb950";
+          } else {
+            kasmLabel.innerText = "KasmVNC Desktop";
+            kasmBadge.style.borderColor = "var(--surface-border)";
           }
         } else {
           gatewayLabel.innerText = "Gateway: Offline";
