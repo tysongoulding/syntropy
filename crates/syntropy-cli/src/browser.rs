@@ -165,6 +165,18 @@ async fn get_page_info(
     (String::new(), String::new())
 }
 
+#[cfg(not(windows))]
+fn focus_chrome_window() {
+    let display = std::env::var("DISPLAY").unwrap_or_else(|_| ":1".to_string());
+    let _ = std::process::Command::new("bash")
+        .arg("-c")
+        .arg(format!("DISPLAY={disp} xdotool search --onlyvisible --class chrome windowactivate 2>/dev/null || DISPLAY={disp} xdotool search --onlyvisible --class google-chrome windowactivate 2>/dev/null", disp = display))
+        .spawn();
+}
+
+#[cfg(windows)]
+fn focus_chrome_window() {}
+
 /// Executes a browser action against the local Chrome DevTools Protocol instance.
 pub async fn execute_browser_action(
     cdp_port: u16,
@@ -190,6 +202,8 @@ pub async fn execute_browser_action(
             )),
         });
     }
+
+    focus_chrome_window();
 
     // 2. Query target pages
     let list_url = format!("http://127.0.0.1:{}/json", cdp_port);
@@ -434,12 +448,44 @@ pub async fn execute_browser_action(
 
         "press" | "key" => {
             let key = action.text.as_deref().unwrap_or("Enter");
+
+            if key.eq_ignore_ascii_case("enter") {
+                let key_down = json!({
+                    "id": 65,
+                    "method": "Input.dispatchKeyEvent",
+                    "params": {
+                        "type": "rawKeyDown",
+                        "windowsVirtualKeyCode": 13,
+                        "unmodifiedText": "\r",
+                        "text": "\r"
+                    }
+                });
+                let _ = ws_stream.send(Message::Text(key_down.to_string().into())).await;
+                tokio::time::sleep(Duration::from_millis(50)).await;
+                let key_up = json!({
+                    "id": 66,
+                    "method": "Input.dispatchKeyEvent",
+                    "params": {
+                        "type": "keyUp",
+                        "windowsVirtualKeyCode": 13
+                    }
+                });
+                let _ = ws_stream.send(Message::Text(key_up.to_string().into())).await;
+            }
+
             let press_expr = format!(
                 r#"(() => {{
                     const key = '{}';
                     const el = document.activeElement || document.body;
                     el.dispatchEvent(new KeyboardEvent('keydown', {{ key, code: key, bubbles: true }}));
                     el.dispatchEvent(new KeyboardEvent('keyup', {{ key, code: key, bubbles: true }}));
+                    if (key.toLowerCase() === 'enter') {{
+                        const sendBtn = document.querySelector('button[aria-label*="Send" i], button[data-e2e-send-message-button], mws-message-send-button button, [aria-label*="Send end-to-end encrypted message" i], [aria-label*="Send RCS" i], [aria-label*="Send SMS" i]');
+                        if (sendBtn) {{
+                            sendBtn.click();
+                            return 'Pressed Enter and clicked Send button';
+                        }}
+                    }}
                     return 'Pressed key: ' + key;
                 }})()"#,
                 key.replace('\\', "\\\\").replace('\'', "\\'")

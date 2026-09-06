@@ -667,9 +667,14 @@
       localStorage.setItem("syntropy_gemini_model", modelVal);
       if (val) {
         localStorage.setItem("syntropy_gemini_api_key", val);
+        fetch("/api/key", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ api_key: val, model: modelVal })
+        }).catch(e => console.warn("Failed to persist key to server:", e));
         if (keyStatusMsg) {
           keyStatusMsg.style.color = "#3fb950";
-          keyStatusMsg.innerText = `✓ Model ${modelVal} & key saved!`;
+          keyStatusMsg.innerText = `✓ Model ${modelVal} & key saved to cloud VM!`;
         }
         setTimeout(() => closeKeyModal(), 600);
       } else {
@@ -680,14 +685,32 @@
 
     function clearApiKey() {
       localStorage.removeItem("syntropy_gemini_api_key");
+      fetch("/api/key", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ api_key: "", model: "gemini-3.8-flash" })
+      }).catch(e => console.warn("Failed to clear key on server:", e));
       if (geminiKeyInput) geminiKeyInput.value = "";
       if (keyStatusMsg) {
         keyStatusMsg.style.color = "var(--text-muted)";
-        keyStatusMsg.innerText = "Key removed from local storage.";
+        keyStatusMsg.innerText = "Key removed from local storage & server.";
       }
       updateKeyBadgeUI();
       setTimeout(() => closeKeyModal(), 600);
     }
+
+    fetch("/api/key")
+      .then(r => r.json())
+      .then(data => {
+        if (data.has_key && !localStorage.getItem("syntropy_gemini_api_key")) {
+          localStorage.setItem("syntropy_gemini_api_key", "SAVED_ON_SERVER");
+        }
+        if (data.model) {
+          localStorage.setItem("syntropy_gemini_model", data.model);
+        }
+        updateKeyBadgeUI();
+      })
+      .catch(() => {});
 
     let currentVncHost = localStorage.getItem("syntropy_vnc_host") || (window.location.hostname && window.location.hostname !== "127.0.0.1" && window.location.hostname !== "localhost" ? window.location.hostname : "34.106.12.222");
     const vncHostInput = document.getElementById("vnc-host-input");

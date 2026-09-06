@@ -82,16 +82,48 @@ impl GeminiClient {
         }
     }
 
-    /// Create client from `GEMINI_API_KEY` environment variable, falling back to Dev Mock if absent.
+    /// Resolves the Gemini API key from environment or persistent file storage.
+    pub fn resolve_api_key() -> Option<String> {
+        if let Ok(key) = std::env::var("GEMINI_API_KEY") {
+            let clean = key.trim().replace(['\r', '\n'], "");
+            if !clean.is_empty() {
+                return Some(clean);
+            }
+        }
+
+        // Check ~/.config/syntropy/gemini.key
+        if let Ok(home) = std::env::var("HOME").or_else(|_| std::env::var("USERPROFILE")) {
+            let path = std::path::Path::new(&home).join(".config").join("syntropy").join("gemini.key");
+            if let Ok(content) = std::fs::read_to_string(&path) {
+                let clean = content.trim().replace(['\r', '\n'], "");
+                if !clean.is_empty() {
+                    return Some(clean);
+                }
+            }
+        }
+
+        // Check .syntropy/gemini.key in current working directory
+        let local_path = std::path::Path::new(".syntropy").join("gemini.key");
+        if let Ok(content) = std::fs::read_to_string(&local_path) {
+            let clean = content.trim().replace(['\r', '\n'], "");
+            if !clean.is_empty() {
+                return Some(clean);
+            }
+        }
+
+        None
+    }
+
+    /// Create client from `GEMINI_API_KEY` or persistent key file, falling back to Dev Mock if absent.
     pub fn from_env() -> Self {
         let model = std::env::var("GEMINI_MODEL").unwrap_or_else(|_| "gemini-3.8-flash".to_string());
-        match std::env::var("GEMINI_API_KEY") {
-            Ok(key) if !key.trim().is_empty() => {
-                info!("GeminiClient: using API key from GEMINI_API_KEY environment variable (model: {})", model);
-                Self::new(key.trim(), model)
+        match Self::resolve_api_key() {
+            Some(key) => {
+                info!("GeminiClient: using resolved API key (model: {})", model);
+                Self::new(key, model)
             }
-            _ => {
-                info!("GeminiClient: no GEMINI_API_KEY found, initializing in offline Dev Mock mode");
+            None => {
+                info!("GeminiClient: no API key found in env or ~/.config/syntropy/gemini.key, initializing in offline Dev Mock mode");
                 Self::dev_mock()
             }
         }
@@ -264,6 +296,39 @@ impl GeminiClient {
                 }),
             });
             format!("Syntropy Dev Mock: Navigating to '{}' via Chrome CDP.", target_url)
+        } else if p_lower.contains("kayla") || p_lower.contains("text") || p_lower.contains("message") {
+            let msg = if p_lower.contains("bed") {
+                "Ill be coming to bed soon"
+            } else if let Some(idx) = prompt.to_lowercase().find("text kayla") {
+                let rest = prompt[idx + 10..].trim();
+                if rest.is_empty() { "Ill be coming to bed soon" } else { rest }
+            } else {
+                "Ill be coming to bed soon"
+            };
+
+            tool_calls.push(GeminiToolCall {
+                name: "browser_action".into(),
+                args: json!({
+                    "action": "click",
+                    "selector": "Kayla Goulding"
+                }),
+            });
+            tool_calls.push(GeminiToolCall {
+                name: "browser_action".into(),
+                args: json!({
+                    "action": "type",
+                    "selector": "textarea.input, div.input",
+                    "text": msg
+                }),
+            });
+            tool_calls.push(GeminiToolCall {
+                name: "browser_action".into(),
+                args: json!({
+                    "action": "press",
+                    "text": "Enter"
+                }),
+            });
+            format!("Selecting conversation with Kayla Goulding, typing message: '{}', and sending via Chrome CDP.", msg)
         } else {
             format!("Syntropy Dev Mock: Received prompt '{}'. Swarm reasoning complete.", prompt)
         };

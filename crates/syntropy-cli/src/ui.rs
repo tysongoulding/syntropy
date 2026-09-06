@@ -2,7 +2,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
 use serde::{Deserialize, Serialize};
-use serde_json::json;
+use serde_json::{json, Value};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
 use tracing::{error, info, warn};
@@ -106,18 +106,27 @@ pub async fn start_ui_server(
     let shared_workspace = Arc::new(workspace_root);
     let shared_gateway = Arc::new(server_url);
     let shared_vnc = Arc::new(target_vnc);
+    let shared_ledger = Arc::new(tokio::sync::Mutex::new(None));
 
     loop {
-        let (stream, _) = listener.accept().await?;
-        let ws = shared_workspace.clone();
-        let gw = shared_gateway.clone();
-        let vnc = shared_vnc.clone();
+        match listener.accept().await {
+            Ok((stream, _)) => {
+                let ws = shared_workspace.clone();
+                let gw = shared_gateway.clone();
+                let vnc = shared_vnc.clone();
+                let ledger = shared_ledger.clone();
 
-        tokio::spawn(async move {
-            if let Err(e) = handle_connection(stream, ws, gw, vnc).await {
-                error!("HTTP connection error: {}", e);
+                tokio::spawn(async move {
+                    if let Err(e) = handle_connection(stream, ws, gw, vnc, ledger).await {
+                        error!("HTTP connection error: {}", e);
+                    }
+                });
             }
-        });
+            Err(e) => {
+                warn!("TCP accept error: {}, pausing briefly", e);
+                tokio::time::sleep(Duration::from_millis(50)).await;
+            }
+        }
     }
 }
 
@@ -126,6 +135,7 @@ async fn handle_connection(
     workspace: Arc<PathBuf>,
     gateway_url: Arc<String>,
     vnc_host: Arc<String>,
+    shared_ledger: Arc<tokio::sync::Mutex<Option<MerkleAuditLedger>>>,
 ) -> Result<(), anyhow::Error> {
     let mut buffer = [0u8; 8192];
     let n = stream.read(&mut buffer).await?;
@@ -252,31 +262,106 @@ async fn handle_connection(
                 return Ok(());
             }
 
-            match MerkleAuditLedger::open(&audit_path) {
-                Ok(ledger) => {
-                    let integrity = ledger.verify_integrity().unwrap_or(syntropy_security::IntegrityReport {
-                        is_valid: false,
-                        verified_count: 0,
-                        latest_hash: None,
-                        violation: None,
-                    });
-                    let root = ledger.compute_merkle_root().ok().flatten().unwrap_or_else(|| "Genesis".into());
+            let mut guard = shared_ledger.lock().await;
+            if guard.is_none() {
+                *guard = MerkleAuditLedger::open(&audit_path).ok();
+            }
 
-                    // Query recent entries from ledger
-                    let entries = query_recent_audit_entries(&ledger);
-                    let resp = json!({
-                        "total_entries": integrity.verified_count,
-                        "verified": integrity.is_valid,
-                        "merkle_root": root,
-                        "entries": entries
-                    });
-                    send_json_response(&mut stream, 200, &resp).await?;
-                }
-                Err(e) => {
-                    let err = json!({ "error": format!("Failed to open audit database: {}", e) });
-                    send_json_response(&mut stream, 500, &err).await?;
+            if let Some(ref ledger) = *guard {
+                let integrity = ledger.verify_integrity().unwrap_or(syntropy_security::IntegrityReport {
+                    is_valid: false,
+                    verified_count: 0,
+                    latest_hash: None,
+                    violation: None,
+                });
+                let root = ledger.compute_merkle_root().ok().flatten().unwrap_or_else(|| "Genesis".into());
+
+                let entries = query_recent_audit_entries(ledger);
+                let resp = json!({
+                    "total_entries": integrity.verified_count,
+                    "verified": integrity.is_valid,
+                    "merkle_root": root,
+                    "entries": entries
+                });
+                send_json_response(&mut stream, 200, &resp).await?;
+            } else {
+                let err = json!({ "error": "Failed to open audit database" });
+                send_json_response(&mut stream, 500, &err).await?;
+            }
+        }
+
+        ("GET", "/api/key") => {
+            let vnc_ip = vnc_host.as_str();
+            let is_remote = vnc_ip != "127.0.0.1" && vnc_ip != "localhost";
+
+            if is_remote {
+                let remote_url = format!("http://{}:3000/api/key", vnc_ip);
+                if let Ok(client) = reqwest::Client::builder().timeout(Duration::from_millis(2000)).build() {
+                    if let Ok(resp) = client.get(&remote_url).send().await {
+                        if resp.status().is_success() {
+                            let bytes = resp.bytes().await.unwrap_or_default();
+                            send_http_response(&mut stream, 200, "application/json", &bytes).await?;
+                            return Ok(());
+                        }
+                    }
                 }
             }
+
+            let key_opt = syntropy_orchestrator::GeminiClient::resolve_api_key();
+            let model = std::env::var("GEMINI_MODEL").unwrap_or_else(|_| "gemini-3.8-flash".to_string());
+            let resp = match key_opt {
+                Some(key) if !key.is_empty() => {
+                    let preview = if key.len() > 8 {
+                        format!("{}...{}", &key[..4], &key[key.len() - 4..])
+                    } else {
+                        "***".to_string()
+                    };
+                    json!({ "has_key": true, "preview": preview, "model": model })
+                }
+                _ => json!({ "has_key": false, "model": model }),
+            };
+            send_json_response(&mut stream, 200, &resp).await?;
+        }
+
+        ("POST", "/api/key") => {
+            let vnc_ip = vnc_host.as_str();
+            let is_remote = vnc_ip != "127.0.0.1" && vnc_ip != "localhost";
+
+            let parsed: Value = serde_json::from_str(body).unwrap_or_default();
+            let raw_key = parsed.get("api_key")
+                .or_else(|| parsed.get("apiKey"))
+                .and_then(|v| v.as_str())
+                .unwrap_or("")
+                .trim()
+                .replace(['\r', '\n'], "");
+            let model = parsed.get("model")
+                .and_then(|v| v.as_str())
+                .unwrap_or("gemini-3.8-flash")
+                .trim();
+
+            if is_remote {
+                let remote_url = format!("http://{}:3000/api/key", vnc_ip);
+                if let Ok(client) = reqwest::Client::builder().timeout(Duration::from_secs(5)).build() {
+                    let _ = client.post(&remote_url).json(&parsed).send().await;
+                }
+            }
+
+            if let Ok(home) = std::env::var("HOME").or_else(|_| std::env::var("USERPROFILE")) {
+                let config_dir = std::path::Path::new(&home).join(".config").join("syntropy");
+                let _ = std::fs::create_dir_all(&config_dir);
+                let key_file = config_dir.join("gemini.key");
+                let _ = std::fs::write(&key_file, &raw_key);
+            }
+
+            if !raw_key.is_empty() {
+                std::env::set_var("GEMINI_API_KEY", &raw_key);
+            }
+            if !model.is_empty() {
+                std::env::set_var("GEMINI_MODEL", model);
+            }
+
+            let resp = json!({ "status": "saved", "model": model });
+            send_json_response(&mut stream, 200, &resp).await?;
         }
 
         ("POST", "/api/clear") => {
@@ -361,6 +446,24 @@ async fn execute_turn_via_tunnel(
         },
         context_files: Default::default(),
     };
+
+    if let Some(ref key) = req.api_key {
+        let clean = key.trim().replace(['\r', '\n'], "");
+        if !clean.is_empty() {
+            std::env::set_var("GEMINI_API_KEY", &clean);
+            if let Ok(home) = std::env::var("HOME").or_else(|_| std::env::var("USERPROFILE")) {
+                let dir = std::path::Path::new(&home).join(".config").join("syntropy");
+                let _ = std::fs::create_dir_all(&dir);
+                let _ = std::fs::write(dir.join("gemini.key"), &clean);
+            }
+        }
+    }
+    if let Some(ref m) = req.model {
+        let clean_m = m.trim().replace(['\r', '\n'], "");
+        if !clean_m.is_empty() {
+            std::env::set_var("GEMINI_MODEL", &clean_m);
+        }
+    }
 
     let jail = WorkspaceJail::new(workspace)?;
     let pty_mux = PtyMultiplexer::new();
@@ -711,14 +814,16 @@ mod tests {
         let ws = Arc::new(temp_dir.clone());
         let gw = Arc::new("http://127.0.0.1:50051".to_string());
         let vnc = Arc::new("34.106.12.222".to_string());
+        let ledger = Arc::new(tokio::sync::Mutex::new(None));
 
         let server_task = tokio::spawn(async move {
             while let Ok((stream, _)) = listener.accept().await {
                 let ws_c = ws.clone();
                 let gw_c = gw.clone();
                 let vnc_c = vnc.clone();
+                let ledger_c = ledger.clone();
                 tokio::spawn(async move {
-                    let _ = handle_connection(stream, ws_c, gw_c, vnc_c).await;
+                    let _ = handle_connection(stream, ws_c, gw_c, vnc_c, ledger_c).await;
                 });
             }
         });
