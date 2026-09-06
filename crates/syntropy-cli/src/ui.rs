@@ -171,8 +171,8 @@ async fn handle_connection(
                     });
                     let root = ledger.compute_merkle_root().ok().flatten().unwrap_or_else(|| "Genesis".into());
 
-                    // Query recent entries from SQLite
-                    let entries = query_recent_audit_entries(&audit_path).unwrap_or_default();
+                    // Query recent entries from ledger
+                    let entries = query_recent_audit_entries(&ledger);
                     let resp = json!({
                         "total_entries": integrity.verified_count,
                         "verified": integrity.is_valid,
@@ -406,27 +406,22 @@ async fn execute_turn_via_tunnel(
     })
 }
 
-fn query_recent_audit_entries(db_path: &Path) -> Result<Vec<AuditEntryView>, anyhow::Error> {
-    let conn = rusqlite::Connection::open(db_path)?;
-    let mut stmt = conn.prepare(
-        "SELECT entry_id, timestamp, agent_id, action_type, entry_hash, previous_hash 
-         FROM audit_log ORDER BY entry_id DESC LIMIT 20"
-    )?;
-
-    let entries = stmt.query_map([], |row| {
-        Ok(AuditEntryView {
-            id: row.get(0)?,
-            timestamp: row.get(1)?,
-            agent_id: row.get(2)?,
-            action_type: row.get(3)?,
-            entry_hash: row.get(4)?,
-            previous_hash: row.get(5)?,
+fn query_recent_audit_entries(ledger: &MerkleAuditLedger) -> Vec<AuditEntryView> {
+    let count = ledger.count().unwrap_or(0);
+    let offset = count.saturating_sub(25);
+    ledger
+        .get_entries(offset, 25)
+        .unwrap_or_default()
+        .into_iter()
+        .map(|e| AuditEntryView {
+            id: e.entry_id,
+            timestamp: e.timestamp,
+            agent_id: e.agent_id,
+            action_type: e.action_type,
+            entry_hash: e.entry_hash,
+            previous_hash: e.previous_hash,
         })
-    })?
-    .filter_map(Result::ok)
-    .collect();
-
-    Ok(entries)
+        .collect()
 }
 
 async fn send_json_response<T: Serialize>(

@@ -581,7 +581,7 @@
           data.entries.slice().reverse().forEach(e => {
             html += `
               <div class="audit-entry">
-                <div style="color:var(--primary); font-weight:600;">#${e.id} [${e.action_type}] - Agent: ${e.agent_id}</div>
+                <div style="color:var(--primary); font-weight:600;">#${e.id || e.entry_id} [${e.action_type}] - Agent: ${e.agent_id}</div>
                 <div style="color:var(--text-muted); font-size:0.75rem;">${e.timestamp}</div>
                 <div style="color:#bc8cff; font-size:0.75rem;">Hash: ${e.entry_hash}</div>
                 <div style="color:var(--text-muted); font-size:0.72rem;">Prev: ${e.previous_hash}</div>
