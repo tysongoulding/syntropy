@@ -366,7 +366,13 @@ async fn main() -> Result<(), anyhow::Error> {
         }
 
         Commands::Ui { port, server_url, no_open } => {
-            let target_url = server_url.unwrap_or_else(|| config.daemon.server_url.clone());
+            let target_url = server_url.unwrap_or_else(|| {
+                if config.daemon.server_url.contains("gateway.syntropy.cloud") {
+                    "http://127.0.0.1:50051".to_string()
+                } else {
+                    config.daemon.server_url.clone()
+                }
+            });
             ui::start_ui_server(port, target_url, workspace_root, no_open).await?;
         }
 
