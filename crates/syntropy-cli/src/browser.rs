@@ -41,6 +41,8 @@ async fn ensure_chrome_running(cdp_port: u16, client: &reqwest::Client) -> bool 
 
     #[cfg(windows)]
     {
+        let local_app = std::env::var("LOCALAPPDATA").unwrap_or_else(|_| "C:\\Temp".to_string());
+        let user_data = format!("{}\\Google\\Chrome\\User Data CDP", local_app);
         let paths = [
             r"C:\Program Files\Google\Chrome\Application\chrome.exe",
             r"C:\Program Files (x86)\Google\Chrome\Application\chrome.exe",
@@ -50,6 +52,9 @@ async fn ensure_chrome_running(cdp_port: u16, client: &reqwest::Client) -> bool 
             if std::path::Path::new(p).exists() {
                 let _ = std::process::Command::new(p)
                     .arg(format!("--remote-debugging-port={}", cdp_port))
+                    .arg(format!("--user-data-dir={}", user_data))
+                    .arg("--no-first-run")
+                    .arg("--no-default-browser-check")
                     .spawn();
                 spawned = true;
                 break;
@@ -57,7 +62,7 @@ async fn ensure_chrome_running(cdp_port: u16, client: &reqwest::Client) -> bool 
         }
         if !spawned {
             let _ = std::process::Command::new("cmd")
-                .args(["/c", "start", "chrome", &format!("--remote-debugging-port={}", cdp_port)])
+                .args(["/c", "start", "chrome", &format!("--remote-debugging-port={}", cdp_port), &format!("--user-data-dir={}", user_data), "--no-first-run", "--no-default-browser-check"])
                 .spawn();
         }
     }
@@ -65,6 +70,7 @@ async fn ensure_chrome_running(cdp_port: u16, client: &reqwest::Client) -> bool 
     #[cfg(not(windows))]
     {
         let display = std::env::var("DISPLAY").unwrap_or_else(|_| ":1".to_string());
+        let user_data = format!("{}/.config/google-chrome-cdp", std::env::var("HOME").unwrap_or_else(|_| "/home/tyson".to_string()));
         let binaries = [
             "/usr/local/bin/google-chrome-launcher",
             "/usr/bin/google-chrome-stable",
@@ -77,6 +83,9 @@ async fn ensure_chrome_running(cdp_port: u16, client: &reqwest::Client) -> bool 
                 let _ = std::process::Command::new(bin)
                     .env("DISPLAY", &display)
                     .arg(format!("--remote-debugging-port={}", cdp_port))
+                    .arg(format!("--user-data-dir={}", user_data))
+                    .arg("--no-first-run")
+                    .arg("--no-default-browser-check")
                     .arg("--disable-dev-shm-usage")
                     .spawn();
                 break;
