@@ -1,11 +1,13 @@
 pub mod blackboard;
 pub mod blueprint;
+pub mod canvas_renderer;
 pub mod gemini;
 pub mod turn;
 pub mod workflow;
 
 pub use blackboard::{Artifact, BlackboardError, BlackboardStore};
 pub use blueprint::{AgentTier, PersonaBlueprint};
+pub use canvas_renderer::{DagEdge, DagGraph, DagNode};
 pub use gemini::{ChatMessage, GeminiClient, GeminiConfig, GeminiToolCall, GeminiTurnResult};
 pub use turn::{AgentTurnEngine, TurnExecutionPlan};
 pub use workflow::{SprintPhase, SprintState, SprintWorkflow, WorkflowError};

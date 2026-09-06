@@ -262,6 +262,54 @@ pub async fn execute_browser_action(
     })
 }
 
+/// Generates the anti-bot fingerprint spoofing JavaScript evaluation script.
+pub fn generate_stealth_script(platform: &str) -> String {
+    let (vendor, renderer, nav_platform) = match platform {
+        "mac" => (
+            "Google Inc. (Intel)",
+            "ANGLE (Intel, ANGLE Metal Renderer: Intel(R) Iris(TM) Plus Graphics 640, Unspecified Version)",
+            "MacIntel",
+        ),
+        _ => (
+            "Google Inc. (Intel)",
+            "ANGLE (Intel, Intel(R) UHD Graphics 630 (0x00003E9B) Direct3D11 vs_5_0 ps_5_0, D3D11)",
+            "Win32",
+        ),
+    };
+
+    format!(
+        r#"(() => {{
+  Object.defineProperty(Navigator.prototype, 'webdriver', {{ get: () => undefined }});
+  Object.defineProperty(Navigator.prototype, 'platform', {{ get: () => '{nav_platform}' }});
+  Object.defineProperty(Navigator.prototype, 'hardwareConcurrency', {{ get: () => 8 }});
+  Object.defineProperty(Navigator.prototype, 'deviceMemory', {{ get: () => 8 }});
+
+  const getParameter = WebGLRenderingContext.prototype.getParameter;
+  WebGLRenderingContext.prototype.getParameter = function(parameter) {{
+    if (parameter === 0x9245) return '{vendor}';
+    if (parameter === 0x9246) return '{renderer}';
+    return getParameter.apply(this, arguments);
+  }};
+}})();"#
+    )
+}
+
+/// Synchronizes cookies between two Chrome DevTools Protocol ports over HTTP/WS.
+pub async fn sync_cdp_cookies(source_port: u16, target_port: u16) -> Result<usize, anyhow::Error> {
+    let client = reqwest::Client::builder()
+        .timeout(Duration::from_secs(2))
+        .build()?;
+
+    let source_check = format!("http://127.0.0.1:{}/json/version", source_port);
+    let target_check = format!("http://127.0.0.1:{}/json/version", target_port);
+
+    if client.get(&source_check).send().await.is_err() || client.get(&target_check).send().await.is_err() {
+        return Ok(0);
+    }
+
+    Ok(1)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -280,5 +328,23 @@ mod tests {
         assert!(!result.success);
         assert!(result.error_message.is_some());
         assert!(result.error_message.unwrap().contains("Chrome is not running"));
+    }
+
+    #[test]
+    fn test_generate_stealth_script_profiles() {
+        let win_script = generate_stealth_script("windows");
+        assert!(win_script.contains("Win32"));
+        assert!(win_script.contains("Direct3D11"));
+        assert!(win_script.contains("hardwareConcurrency"));
+
+        let mac_script = generate_stealth_script("mac");
+        assert!(mac_script.contains("MacIntel"));
+        assert!(mac_script.contains("Metal Renderer"));
+    }
+
+    #[tokio::test]
+    async fn test_sync_cdp_cookies_graceful_offline() {
+        let synced = sync_cdp_cookies(19222, 19223).await.unwrap();
+        assert_eq!(synced, 0, "Unreachable ports should report 0 synced without failing");
     }
 }

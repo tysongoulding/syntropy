@@ -25,6 +25,8 @@ message TunnelServerFrame {
     McpInvokeResponse mcp_response = 19;
     string error_frame = 20;
     AgentMessage agent_message = 21;
+    WebAuthnCeremonyRequest webauthn_request = 22;
+    WebAuthnCeremonyResponse webauthn_response = 23;
   }
 }
 
@@ -47,6 +49,8 @@ message TunnelClientFrame {
     McpInvokeRequest mcp_request = 19;
     string error_frame = 20;
     UserPrompt user_prompt = 21;
+    WebAuthnCeremonyRequest webauthn_request = 22;
+    WebAuthnCeremonyResponse webauthn_response = 23;
   }
 }
 
@@ -161,4 +165,22 @@ message AgentMessage {
   repeated string tool_calls = 3;
   bool is_final = 4;
 }
+
+// WebAuthn hardware key passkey ceremony request forwarded from cloud agent to client.
+message WebAuthnCeremonyRequest {
+  string ceremony_id = 1;
+  string kind = 2; // "get" or "create"
+  string origin = 3;
+  string options_json = 4;
+}
+
+// WebAuthn hardware key passkey ceremony response returned from local device.
+message WebAuthnCeremonyResponse {
+  string ceremony_id = 1;
+  bool success = 2;
+  string credential_json = 3;
+  string error_name = 4;
+  string error_message = 5;
+}
+
 

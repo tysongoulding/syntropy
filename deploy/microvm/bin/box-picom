@@ -1,0 +1,57 @@
+#!/usr/bin/env bash
+# Thin picom launcher that REAPS a stale/orphaned picom already compositing the
+# target DISPLAY before starting, then execs picom. Exactly one compositor can
+# own a display's _NET_WM_CM_S0 selection; a picom the supervisor lost track of
+# (e.g. a missed best-effort pid-file write, or a pid file overwritten by a
+# failed relaunch) keeps that selection, and every relaunch then dies instantly
+# with "Another composite manager is already running" (exit 1) — which the
+# supervisor counts as a death → relaunch → same failure: the SAND-161 picom
+# crashloop (fleet-wide `d*/picom=exit-1` / `already-running` on desktop_health).
+# Reaping the orphan before starting turns that loop into a clean takeover.
+set -uo pipefail
+
+display="${DISPLAY:-}"
+
+picom_candidate_pids() {
+	if command -v pgrep >/dev/null 2>&1; then
+		pgrep -x picom 2>/dev/null || true
+		return 0
+	fi
+	local pid comm
+	for pid_dir in /proc/[0-9]*; do
+		pid="${pid_dir#/proc/}"
+		comm="$( (cat "${pid_dir}/comm") 2>/dev/null || true)"
+		[ "${comm}" = "picom" ] || continue
+		printf '%s\n' "${pid}"
+	done
+}
+
+reap_targets() {
+	local pid comm env_display
+	for pid in $(picom_candidate_pids); do
+		[ -n "${pid}" ] || continue
+		[ "${pid}" = "$$" ] && continue
+		comm="$( (cat "/proc/${pid}/comm") 2>/dev/null || true)"
+		[ "${comm}" = "picom" ] || continue
+		env_display="$( (tr '\0' '\n' <"/proc/${pid}/environ" | sed -n 's/^DISPLAY=//p' | head -n 1) 2>/dev/null || true)"
+		if [ -n "${display}" ] && [ "${env_display}" = "${display}" ]; then
+			printf '%s\n' "${pid}"
+		fi
+	done
+}
+
+if [ -n "${display}" ]; then
+	for pid in $(reap_targets); do
+		kill "${pid}" 2>/dev/null || true
+	done
+	for _ in $(seq 1 50); do
+		remaining="$(reap_targets)"
+		[ -z "${remaining}" ] && break
+		for pid in ${remaining}; do
+			kill -9 "${pid}" 2>/dev/null || true
+		done
+		sleep 0.1
+	done
+fi
+
+exec picom "$@"

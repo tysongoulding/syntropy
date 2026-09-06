@@ -1,0 +1,9 @@
+{
+  "name": "co.anysphere.sand.webauthn_proxy",
+  "description": "Inverted WebAuthn ceremony proxy bridge for Syntropy MicroVM",
+  "path": "/usr/local/bin/sand-webauthn-proxy-host",
+  "type": "stdio",
+  "allowed_origins": [
+    "chrome-extension://pkjakndclmokfbgfnpgjieoebnbghhgb/"
+  ]
+}

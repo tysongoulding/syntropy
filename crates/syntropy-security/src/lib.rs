@@ -3,6 +3,9 @@
 pub mod keystore;
 pub mod broker;
 pub mod ledger;
+pub mod credential_persistence;
+
+pub use credential_persistence::{BackupSummary, CredentialPersistence, PersistenceError, RestoreSummary};
 
 pub use keystore::{
     EncryptedFileKeyStore, InMemoryKeyStore, KeyStore, KeyStoreError,
@@ -13,7 +16,7 @@ pub use keystore::{dpapi, DpapiKeyStore};
 
 pub use broker::{
     compute_hmac_sha256, BrokerAction, BrokerError, CredentialBinding, CredentialBroker,
-    OAuthSession,
+    OAuthSession, WebAuthnCeremonyParams, WebAuthnCeremonyResult,
 };
 
 pub use ledger::{

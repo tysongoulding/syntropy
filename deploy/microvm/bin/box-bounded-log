@@ -1,0 +1,37 @@
+#!/usr/bin/env bash
+set -uo pipefail
+
+# The final exec keeps callers and the desktop supervisor tracking the managed
+# command's PID, not a logger wrapper. The process-substitution shell owns the
+# pipe read end for the command's whole lifetime; if flock, Node, or the sink
+# fails, `cat >/dev/null` takes over that SAME pipe, so a logging failure
+# neither SIGPIPEs nor stops draining the desktop process.
+if [ "${1:-}" != "--run" ] || [ "$#" -lt 4 ]; then
+	exit 64
+fi
+
+log_file="$2"
+shift 2
+if [ "${1:-}" != "--" ]; then
+	exit 64
+fi
+shift
+
+# Close any outer stdout/stderr inherited from an older supervisor: compatible
+# old boxes still open the diagnostic `logFile` directly on these descriptors.
+exec >/dev/null 2>&1
+
+node_bin="${SAND_BOX_BOUNDED_LOG_NODE:-node}"
+sink_script="${SAND_BOX_BOUNDED_LOG_SINK:-/usr/local/bin/box-bounded-log.mjs}"
+
+drain_bounded() {
+	if flock -n "${log_file}.lock" \
+		"${node_bin}" "${sink_script}" "${log_file}" "$$" 2>/dev/null; then
+		return 0
+	fi
+	# Lock contention means another live instance owns this component's
+	# diagnostic files; keep draining so the managed process stays healthy.
+	cat >/dev/null 2>&1 || true
+}
+
+exec "$@" > >(drain_bounded) 2>&1

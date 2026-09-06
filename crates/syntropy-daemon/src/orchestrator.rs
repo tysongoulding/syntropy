@@ -10,9 +10,11 @@ use syntropy_mcp::{McpProxy, ToolAllowlist};
 use syntropy_proto::tunnel::{
     self, ApplyPatch, ApprovalRequest, ApprovalResponse, ExecCommand, McpInvokeRequest,
     McpInvokeResponse, PatchResult, TerminalInputChunk, TerminalOutputChunk, TunnelClientFrame,
-    TunnelServerFrame,
+    TunnelServerFrame, WebAuthnCeremonyRequest, WebAuthnCeremonyResponse,
 };
-use syntropy_security::{CredentialBroker, InMemoryKeyStore, KeyStore, MerkleAuditLedger};
+use syntropy_security::{
+    CredentialBroker, InMemoryKeyStore, KeyStore, MerkleAuditLedger, WebAuthnCeremonyParams,
+};
 
 use crate::config::AppConfig;
 
@@ -129,6 +131,9 @@ impl Orchestrator {
                     is_final = msg.is_final,
                     "AgentMessage received from Cloud Swarm"
                 );
+            }
+            tunnel::tunnel_server_frame::Payload::WebauthnRequest(req) => {
+                self.handle_webauthn_request(req).await;
             }
             _ => {}
         }
@@ -432,5 +437,128 @@ impl Orchestrator {
 
         let frame = self.make_client_frame(tunnel::tunnel_client_frame::Payload::ApprovalResponse(resp));
         let _ = self.client_tx.send(frame).await;
+    }
+
+    async fn handle_webauthn_request(&self, req: WebAuthnCeremonyRequest) {
+        let ceremony_id = req.ceremony_id.clone();
+        info!(
+            ceremony_id = %ceremony_id,
+            kind = %req.kind,
+            origin = %req.origin,
+            "Processing WebAuthn ceremony request locally via credential broker"
+        );
+
+        // 1. Mandatory Audit Logging
+        let payload_data = serde_json::to_vec(&serde_json::json!({
+            "ceremony_id": req.ceremony_id,
+            "kind": req.kind,
+            "origin": req.origin,
+        }))
+        .unwrap_or_default();
+
+        {
+            let l = self.ledger.lock().await;
+            if let Err(e) = l.append(&self.agent_id, "webauthn_ceremony", &payload_data) {
+                error!("Audit ledger write failure: {}", e);
+                let resp = WebAuthnCeremonyResponse {
+                    ceremony_id,
+                    success: false,
+                    credential_json: String::new(),
+                    error_name: "LedgerError".to_string(),
+                    error_message: format!("Audit ledger failed: {}", e),
+                };
+                self.send_webauthn_response(resp).await;
+                return;
+            }
+        }
+
+        // 2. Dispatch to CredentialBroker for hardware-key / local signing
+        let params = WebAuthnCeremonyParams {
+            ceremony_id: req.ceremony_id,
+            kind: req.kind,
+            origin: req.origin,
+            options_json: req.options_json,
+        };
+
+        match self.broker.sign_webauthn_ceremony(&params, None) {
+            Ok(result) => {
+                let resp = WebAuthnCeremonyResponse {
+                    ceremony_id: result.ceremony_id,
+                    success: result.success,
+                    credential_json: result.credential_json,
+                    error_name: result.error_name.unwrap_or_default(),
+                    error_message: result.error_message.unwrap_or_default(),
+                };
+                self.send_webauthn_response(resp).await;
+            }
+            Err(e) => {
+                let resp = WebAuthnCeremonyResponse {
+                    ceremony_id,
+                    success: false,
+                    credential_json: String::new(),
+                    error_name: "BrokerError".to_string(),
+                    error_message: e.to_string(),
+                };
+                self.send_webauthn_response(resp).await;
+            }
+        }
+    }
+
+    async fn send_webauthn_response(&self, resp: WebAuthnCeremonyResponse) {
+        let frame = self.make_client_frame(tunnel::tunnel_client_frame::Payload::WebauthnResponse(resp));
+        let _ = self.client_tx.send(frame).await;
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn test_orchestrator_webauthn_ceremony_handling() {
+        let dir = std::env::temp_dir().join(format!("syntropy-daemon-test-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let (tx, mut rx) = mpsc::channel(16);
+        let config = AppConfig::default();
+
+        let orch = Orchestrator::new(
+            "agent-webauthn-test".into(),
+            dir.clone(),
+            &config,
+            tx,
+        )
+        .unwrap();
+
+        let ceremony_req = WebAuthnCeremonyRequest {
+            ceremony_id: "ceremony-999".into(),
+            kind: "get".into(),
+            origin: "https://auth.example.com".into(),
+            options_json: r#"{"challenge":"YXNkZg"}"#.into(),
+        };
+
+        let frame = TunnelServerFrame {
+            frame_id: "server-frame-999".into(),
+            timestamp_unix_ms: 1234567,
+            payload: Some(tunnel::tunnel_server_frame::Payload::WebauthnRequest(ceremony_req)),
+        };
+
+        orch.handle_frame(frame).await;
+
+        let client_frame = rx.recv().await.expect("Expected client frame response");
+        assert_eq!(client_frame.agent_id, "agent-webauthn-test");
+
+        match client_frame.payload {
+            Some(tunnel::tunnel_client_frame::Payload::WebauthnResponse(resp)) => {
+                assert_eq!(resp.ceremony_id, "ceremony-999");
+                assert!(resp.success);
+                assert!(!resp.credential_json.is_empty());
+                let parsed: serde_json::Value = serde_json::from_str(&resp.credential_json).unwrap();
+                assert_eq!(parsed["id"], "ceremony-999");
+                assert_eq!(parsed["type"], "public-key");
+            }
+            other => panic!("Unexpected payload received: {:?}", other),
+        }
+
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

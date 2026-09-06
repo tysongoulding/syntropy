@@ -1,0 +1,125 @@
+#!/usr/bin/env bash
+# cursor-agent-store-fuse: FUSE remote storage mount script for /agent-store
+# Mounts Cloud Storage/S3 bucket backing to provide infinite virtual storage
+# for LLM caches, model artifacts, and checkpoint snapshots.
+set -euo pipefail
+
+MOUNT_POINT="${AGENT_STORE_MOUNT:-/agent-store}"
+BUCKET_NAME="${AGENT_STORE_BUCKET:-syntropy-agent-store}"
+CACHE_DIR="${AGENT_STORE_CACHE_DIR:-/var/cache/agent-store}"
+LOG_FILE="${AGENT_STORE_LOG_FILE:-/var/log/agent-store-fuse.log}"
+ENDPOINT="${AGENT_STORE_ENDPOINT:-}"
+READ_ONLY="${AGENT_STORE_READ_ONLY:-0}"
+MOCK_MODE="${AGENT_STORE_MOCK:-0}"
+
+log() {
+    local ts
+    ts="$(date -u +"%Y-%m-%dT%H:%M:%SZ")"
+    printf '[cursor-agent-store-fuse] [%s] %s\n' "$ts" "$*"
+}
+
+is_mounted() {
+    local target="$1"
+    if [ -f /proc/mounts ]; then
+        grep -q -F " $target " /proc/mounts
+    else
+        mount | grep -q -F " $target "
+    fi
+}
+
+do_unmount() {
+    local target="$1"
+    if is_mounted "$target"; then
+        log "Unmounting $target..."
+        rm -f "$target/.mounted" 2>/dev/null || true
+        if command -v fusermount >/dev/null 2>&1; then
+            fusermount -u "$target" || fusermount -uz "$target" || true
+        else
+            umount "$target" || umount -l "$target" || true
+        fi
+        log "Unmounted $target."
+    else
+        log "$target is not mounted."
+    fi
+}
+
+do_status() {
+    local target="$1"
+    if is_mounted "$target"; then
+        log "Status: MOUNTED on $target"
+        if [ -f "$target/.mounted" ]; then
+            cat "$target/.mounted"
+        fi
+        exit 0
+    else
+        log "Status: NOT MOUNTED ($target)"
+        exit 1
+    fi
+}
+
+do_mount() {
+    local target="$1"
+    mkdir -p "$target"
+    mkdir -p "$CACHE_DIR"
+
+    if is_mounted "$target"; then
+        log "$target is already mounted. Refreshing sentinel..."
+        printf 'bucket=%s\nmount=%s\ntimestamp=%s\npid=%s\n' \
+            "$BUCKET_NAME" "$target" "$(date -u +"%Y-%m-%dT%H:%M:%SZ")" "$$" > "$target/.mounted"
+        return 0
+    fi
+
+    # Trap clean unmount on exit/signal
+    trap 'log "Received signal, tearing down..."; do_unmount "$target"; exit 0' SIGINT SIGTERM
+
+    # Check for fuse capability or mock mode
+    if [ "$MOCK_MODE" = "1" ] || [ ! -e /dev/fuse ] || (! command -v gcsfuse >/dev/null 2>&1 && ! command -v s3fs >/dev/null 2>&1); then
+        log "FUSE provider not available or mock mode active; initializing local backed store at $target"
+        mkdir -p "$target"
+        printf 'mode=local-mock\nbucket=%s\nmount=%s\ntimestamp=%s\npid=%s\n' \
+            "$BUCKET_NAME" "$target" "$(date -u +"%Y-%m-%dT%H:%M:%SZ")" "$$" > "$target/.mounted"
+        log "Mock agent-store ready at $target"
+        return 0
+    fi
+
+    log "Mounting bucket '$BUCKET_NAME' at '$target'..."
+    if command -v gcsfuse >/dev/null 2>&1; then
+        local ro_flag=""
+        [ "$READ_ONLY" = "1" ] && ro_flag="-o ro"
+        gcsfuse \
+            --implicit-dirs \
+            --stat-cache-ttl 1m \
+            --type-cache-ttl 1m \
+            --temp-dir "$CACHE_DIR" \
+            $ro_flag \
+            "$BUCKET_NAME" "$target" >> "$LOG_FILE" 2>&1
+    elif command -v s3fs >/dev/null 2>&1; then
+        local endpoint_opt=""
+        [ -n "$ENDPOINT" ] && endpoint_opt="-o url=$ENDPOINT"
+        local ro_opt=""
+        [ "$READ_ONLY" = "1" ] && ro_opt="-o ro"
+        s3fs "$BUCKET_NAME" "$target" \
+            -o use_cache="$CACHE_DIR" \
+            -o allow_other \
+            $endpoint_opt \
+            $ro_opt >> "$LOG_FILE" 2>&1
+    fi
+
+    # Write sentinel file
+    printf 'bucket=%s\nmount=%s\ntimestamp=%s\npid=%s\n' \
+        "$BUCKET_NAME" "$target" "$(date -u +"%Y-%m-%dT%H:%M:%SZ")" "$$" > "$target/.mounted"
+    log "Successfully mounted $BUCKET_NAME at $target"
+}
+
+action="${1:---mount}"
+case "$action" in
+    --status|-s)
+        do_status "$MOUNT_POINT"
+        ;;
+    --unmount|-u)
+        do_unmount "$MOUNT_POINT"
+        ;;
+    --mount|-m|*)
+        do_mount "$MOUNT_POINT"
+        ;;
+esac

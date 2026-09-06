@@ -185,3 +185,42 @@ impl AppConfig {
         }
     }
 }
+
+/// Protected script deny-list preventing remote bundles from overwriting core hypervisor/init scripts.
+pub const BOX_SCRIPTS_DENY: &[&str] = &[
+    "start-sand-box",
+    "sand-exit-watch",
+    "sand-supervisor.mjs",
+    "fetch-exec-daemon",
+    "sand-desktop-supervise.sh",
+    "box-cgroups.sh",
+    "ensure-machine-id",
+    "box-xvfb",
+    "box-x11vnc",
+    "start-exec-daemon",
+    "supervise-exec-daemon",
+    "supervise-sand-supervisor",
+];
+
+/// Validates whether a remote script update is permitted.
+pub fn is_script_update_allowed(script_name: &str) -> bool {
+    let clean = script_name.trim();
+    let base = clean.split('/').next_back().unwrap_or(clean);
+    !BOX_SCRIPTS_DENY.contains(&base)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_box_scripts_deny_rejection() {
+        assert!(!is_script_update_allowed("start-sand-box"));
+        assert!(!is_script_update_allowed("box-cgroups.sh"));
+        assert!(!is_script_update_allowed("box-xvfb"));
+        assert!(!is_script_update_allowed("/usr/local/bin/sand-supervisor.mjs"));
+
+        assert!(is_script_update_allowed("custom-tool.sh"));
+        assert!(is_script_update_allowed("user-script.py"));
+    }
+}

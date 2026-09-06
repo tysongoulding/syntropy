@@ -235,6 +235,66 @@ impl WorktreeManager {
         }
         Ok(())
     }
+
+    /// Verifies whether the agent store mount or remote backing directory is active and operational.
+    ///
+    /// Checks:
+    /// 1. Worktree-local `.agent-store/.mounted` sentinel.
+    /// 2. Environment variable `AGENT_STORE_MOUNT` override path sentinel.
+    /// 3. System-wide `/agent-store/.mounted` sentinel or `/agent-store/<agent_id>` directory.
+    pub fn verify_mount_backing(&self, agent_id: &str) -> Result<bool, WorktreeError> {
+        validate_agent_id(agent_id)?;
+        let wt_path = self.worktree_path(agent_id)?;
+
+        // 1. Check if agent-store mount exists within worktree
+        let local_sentinel = wt_path.join(".agent-store").join(".mounted");
+        if local_sentinel.exists() {
+            return Ok(true);
+        }
+
+        // 2. Check environment override AGENT_STORE_MOUNT
+        if let Ok(env_mount) = std::env::var("AGENT_STORE_MOUNT") {
+            let env_path = PathBuf::from(env_mount);
+            if env_path.join(".mounted").exists() || env_path.join(agent_id).exists() {
+                return Ok(true);
+            }
+        }
+
+        // 3. Check system-level /agent-store mount
+        let sys_mount = Path::new("/agent-store");
+        if sys_mount.exists()
+            && (sys_mount.join(".mounted").exists() || sys_mount.join(agent_id).exists())
+        {
+            return Ok(true);
+        }
+
+        Ok(false)
+    }
+
+    /// Links or associates an agent-store backing directory to the agent's worktree.
+    pub fn link_agent_store(
+        &self,
+        agent_id: &str,
+        store_path: impl AsRef<Path>,
+    ) -> Result<PathBuf, WorktreeError> {
+        validate_agent_id(agent_id)?;
+        let wt_path = self.worktree_path(agent_id)?;
+        let target = wt_path.join(".agent-store");
+        let store_path = store_path.as_ref();
+
+        if !store_path.exists() {
+            return Err(WorktreeError::Io(std::io::Error::new(
+                std::io::ErrorKind::NotFound,
+                format!("Backing store path does not exist: {}", store_path.display()),
+            )));
+        }
+
+        std::fs::create_dir_all(&target)?;
+        let sentinel = target.join(".mounted");
+        std::fs::write(&sentinel, format!("linked_to={}\n", store_path.display()))?;
+
+        Ok(target)
+    }
 }
 
 /// Validates that an agent ID is safe for path traversal and filesystem use.
@@ -336,6 +396,33 @@ mod tests {
                 }
             }
         }
+
+        let _ = std::fs::remove_dir_all(&temp_dir);
+    }
+
+    #[test]
+    fn test_verify_mount_backing() {
+        let temp_dir = std::env::temp_dir().join(format!("syntropy_wt_mount_test_{}", uuid::Uuid::new_v4()));
+        let git_dir = temp_dir.join(".git");
+        std::fs::create_dir_all(&git_dir).unwrap();
+
+        let manager = WorktreeManager::new(&temp_dir).unwrap();
+        let agent_id = "test-agent-fuse";
+
+        // Without mount or link, verify returns false
+        assert_eq!(manager.verify_mount_backing(agent_id).unwrap(), false);
+
+        // Link external store directory
+        let ext_store = temp_dir.join("remote_store_backing");
+        std::fs::create_dir_all(&ext_store).unwrap();
+        let linked = manager.link_agent_store(agent_id, &ext_store).unwrap();
+        assert!(linked.exists());
+
+        // Now verify_mount_backing should return true due to sentinel
+        assert_eq!(manager.verify_mount_backing(agent_id).unwrap(), true);
+
+        // Test invalid agent ID rejection
+        assert!(manager.verify_mount_backing("../escape").is_err());
 
         let _ = std::fs::remove_dir_all(&temp_dir);
     }

@@ -25,6 +25,15 @@ impl DaemonService {
     }
 
     pub async fn run(self) -> Result<(), anyhow::Error> {
+        #[cfg(target_os = "linux")]
+        {
+            let cgroup_path = std::path::Path::new("/sys/fs/cgroup/agent/cgroup.procs");
+            if cgroup_path.exists() {
+                let pid = std::process::id();
+                let _ = std::fs::write(cgroup_path, format!("{}\n", pid));
+            }
+        }
+
         info!("Starting Syntropy Daemon service for workspace: {:?}", self.workspace_root);
         info!("Connecting outbound tunnel to: {}", self.config.daemon.server_url);
 

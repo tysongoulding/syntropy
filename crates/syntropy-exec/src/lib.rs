@@ -9,6 +9,11 @@ pub mod diff;
 pub mod jail;
 pub mod pty_mux;
 pub mod worktree;
+pub mod semantic_chunker;
+pub mod process_inspector;
+
+pub use semantic_chunker::{CodeChunk, SemanticChunker};
+pub use process_inspector::{InspectorError, ProcessEntry, ProcessInspector};
 
 pub use diff::{
     compute_sha256, AtomicPatchApplicator, DiffError, LineReplacement, PatchApplyResult,

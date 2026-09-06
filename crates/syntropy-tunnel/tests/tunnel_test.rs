@@ -3,7 +3,8 @@ use std::time::Duration;
 use syntropy_proto::tunnel::{
     tunnel_client_frame, tunnel_server_frame, ApplyPatch, ApprovalRequest, ApprovalResponse,
     ExecCommand, McpInvokeRequest, McpInvokeResponse, PatchResult, TerminalInputChunk,
-    TerminalOutputChunk, TunnelClientFrame, TunnelServerFrame,
+    TerminalOutputChunk, TunnelClientFrame, TunnelServerFrame, WebAuthnCeremonyRequest,
+    WebAuthnCeremonyResponse,
 };
 use syntropy_tunnel::{MockGatewayServer, TunnelClient, TunnelConfig};
 
@@ -336,6 +337,61 @@ async fn test_frame_multiplexing_all_types() {
 
     let client_rec = rx.recv().await.unwrap();
     assert_eq!(client_rec.frame_id, "appr-res-1");
+
+    // 8. WebAuthnCeremonyRequest (Server -> Client)
+    server
+        .send_server_frame(TunnelServerFrame {
+            frame_id: "webauthn-req-1".into(),
+            timestamp_unix_ms: 8,
+            payload: Some(tunnel_server_frame::Payload::WebauthnRequest(
+                WebAuthnCeremonyRequest {
+                    ceremony_id: "cer-1".into(),
+                    kind: "get".into(),
+                    origin: "https://login.example.com".into(),
+                    options_json: "{}".into(),
+                },
+            )),
+        })
+        .await
+        .unwrap();
+
+    let client_rec = rx.recv().await.unwrap();
+    assert_eq!(client_rec.frame_id, "webauthn-req-1");
+    match client_rec.payload {
+        Some(tunnel_server_frame::Payload::WebauthnRequest(req)) => {
+            assert_eq!(req.ceremony_id, "cer-1");
+            assert_eq!(req.origin, "https://login.example.com");
+        }
+        other => panic!("Unexpected payload: {:?}", other),
+    }
+
+    // 9. WebAuthnCeremonyResponse (Client -> Server)
+    tx.send(TunnelClientFrame {
+        frame_id: "webauthn-res-1".into(),
+        timestamp_unix_ms: 9,
+        agent_id: "agent-all-types".into(),
+        payload: Some(tunnel_client_frame::Payload::WebauthnResponse(
+            WebAuthnCeremonyResponse {
+                ceremony_id: "cer-1".into(),
+                success: true,
+                credential_json: "{\"type\":\"public-key\"}".into(),
+                error_name: String::new(),
+                error_message: String::new(),
+            },
+        )),
+    })
+    .await
+    .unwrap();
+
+    let rec = server.recv_client_frame().await.unwrap();
+    assert_eq!(rec.frame_id, "webauthn-res-1");
+    match rec.payload {
+        Some(tunnel_client_frame::Payload::WebauthnResponse(resp)) => {
+            assert_eq!(resp.ceremony_id, "cer-1");
+            assert!(resp.success);
+        }
+        other => panic!("Unexpected payload: {:?}", other),
+    }
 
     handle.close().await;
     server.stop().await;

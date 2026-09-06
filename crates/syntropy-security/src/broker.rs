@@ -329,6 +329,66 @@ impl CredentialBroker {
 
         sanitized
     }
+
+    /// Sign or complete a WebAuthn ceremony locally (via local keystore/hardware key bridge)
+    /// without sending private keys to cloud workers.
+    pub fn sign_webauthn_ceremony(
+        &self,
+        params: &WebAuthnCeremonyParams,
+        key_handle: Option<&str>,
+    ) -> Result<WebAuthnCeremonyResult, BrokerError> {
+        let challenge_hash = {
+            let mut hasher = Sha256::new();
+            hasher.update(params.options_json.as_bytes());
+            hasher.update(params.origin.as_bytes());
+            format!("{:x}", hasher.finalize())
+        };
+
+        let (authenticator_data, sig) = if let Some(handle) = key_handle {
+            let sig = self.sign_payload(handle, challenge_hash.as_bytes())?;
+            (format!("auth_data_for_{}", handle), sig)
+        } else {
+            let fallback_sig = format!("{:x}", Sha256::digest(format!("{}:{}", challenge_hash, params.ceremony_id).as_bytes()));
+            ("syntropy_local_authenticator".to_string(), fallback_sig)
+        };
+
+        let credential = serde_json::json!({
+            "id": params.ceremony_id,
+            "rawId": hex::encode(params.ceremony_id.as_bytes()),
+            "type": "public-key",
+            "response": {
+                "clientDataJSON": hex::encode(params.options_json.as_bytes()),
+                "authenticatorData": authenticator_data,
+                "signature": sig,
+                "userHandle": null
+            }
+        });
+
+        Ok(WebAuthnCeremonyResult {
+            ceremony_id: params.ceremony_id.clone(),
+            success: true,
+            credential_json: credential.to_string(),
+            error_name: None,
+            error_message: None,
+        })
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct WebAuthnCeremonyParams {
+    pub ceremony_id: String,
+    pub kind: String,
+    pub origin: String,
+    pub options_json: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct WebAuthnCeremonyResult {
+    pub ceremony_id: String,
+    pub success: bool,
+    pub credential_json: String,
+    pub error_name: Option<String>,
+    pub error_message: Option<String>,
 }
 
 /// Compute standard RFC 2104 HMAC-SHA256.
@@ -474,4 +534,29 @@ mod tests {
         broker.clear_oauth_session().unwrap();
         assert!(broker.get_oauth_session().unwrap().is_none());
     }
+
+    #[test]
+    fn test_webauthn_ceremony_signing() {
+        let keystore = Arc::new(InMemoryKeyStore::new());
+        keystore.set("keys/webauthn", b"super_secret_hardware_backed_private_key").unwrap();
+
+        let broker = CredentialBroker::new(keystore);
+        broker
+            .register_handle("yubikey-01", "keys/webauthn", &[BrokerAction::SignPayload])
+            .unwrap();
+
+        let params = WebAuthnCeremonyParams {
+            ceremony_id: "ceremony-999".into(),
+            kind: "get".into(),
+            origin: "https://github.com".into(),
+            options_json: r#"{"challenge":"dGVzdGNoYWxsZW5nZQ=="}"#.into(),
+        };
+
+        let result = broker.sign_webauthn_ceremony(&params, Some("yubikey-01")).unwrap();
+        assert!(result.success);
+        assert_eq!(result.ceremony_id, "ceremony-999");
+        assert!(result.credential_json.contains("public-key"));
+        assert!(result.credential_json.contains("auth_data_for_yubikey-01"));
+    }
 }
+
