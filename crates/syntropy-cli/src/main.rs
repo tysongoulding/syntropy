@@ -64,6 +64,10 @@ enum Commands {
         #[arg(long, default_value = "0.0.0.0")]
         host: String,
 
+        /// Remote VNC Host IP or hostname (e.g. 34.106.12.222)
+        #[arg(long, default_value = "34.106.12.222")]
+        vnc_host: String,
+
         /// Gateway server URL (e.g. http://127.0.0.1:50051)
         #[arg(short, long)]
         server_url: Option<String>,
@@ -369,7 +373,7 @@ async fn main() -> Result<(), anyhow::Error> {
             }
         }
 
-        Commands::Ui { port, host, server_url, no_open } => {
+        Commands::Ui { port, host, vnc_host, server_url, no_open } => {
             let target_url = server_url.unwrap_or_else(|| {
                 if config.daemon.server_url.contains("gateway.syntropy.cloud") {
                     "http://127.0.0.1:50051".to_string()
@@ -377,7 +381,7 @@ async fn main() -> Result<(), anyhow::Error> {
                     config.daemon.server_url.clone()
                 }
             });
-            ui::start_ui_server(&host, port, target_url, workspace_root, no_open).await?;
+            ui::start_ui_server(&host, port, target_url, workspace_root, no_open, Some(vnc_host)).await?;
         }
 
         Commands::Daemon { server_url } => {

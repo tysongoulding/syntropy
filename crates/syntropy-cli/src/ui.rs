@@ -67,6 +67,7 @@ pub async fn start_ui_server(
     server_url: String,
     workspace_root: PathBuf,
     no_open: bool,
+    vnc_host: Option<String>,
 ) -> Result<(), anyhow::Error> {
     let addr = format!("{}:{}", host, port);
     let listener = TcpListener::bind(&addr).await?;
@@ -77,11 +78,14 @@ pub async fn start_ui_server(
         format!("http://{}", local_addr)
     };
 
+    let target_vnc = vnc_host.unwrap_or_else(|| "34.106.12.222".to_string());
+
     info!("🚀 Syntropy UI server listening at {}:{}", host, port);
     println!("\n========================================================");
     println!("⚡ Syntropy Swarm UI active at: http://{}:{}", if host == "0.0.0.0" { "0.0.0.0" } else { host }, port);
     println!("🔗 Local Browser Access:        {}", display_url);
     println!("🌐 Network Access (Proxmox/LAN): http://<YOUR_IP>:{}", port);
+    println!("🖥️ Remote VNC Host:            {}", target_vnc);
     println!("🔗 Connected to Cloud Gateway:   {}", server_url);
     println!("📂 Workspace root:               {:?}", workspace_root);
     println!("========================================================\n");
@@ -99,14 +103,16 @@ pub async fn start_ui_server(
 
     let shared_workspace = Arc::new(workspace_root);
     let shared_gateway = Arc::new(server_url);
+    let shared_vnc = Arc::new(target_vnc);
 
     loop {
         let (stream, _) = listener.accept().await?;
         let ws = shared_workspace.clone();
         let gw = shared_gateway.clone();
+        let vnc = shared_vnc.clone();
 
         tokio::spawn(async move {
-            if let Err(e) = handle_connection(stream, ws, gw).await {
+            if let Err(e) = handle_connection(stream, ws, gw, vnc).await {
                 error!("HTTP connection error: {}", e);
             }
         });
@@ -117,6 +123,7 @@ async fn handle_connection(
     mut stream: TcpStream,
     workspace: Arc<PathBuf>,
     gateway_url: Arc<String>,
+    vnc_host: Arc<String>,
 ) -> Result<(), anyhow::Error> {
     let mut buffer = [0u8; 8192];
     let n = stream.read(&mut buffer).await?;
@@ -157,13 +164,16 @@ async fn handle_connection(
         ("GET", "/api/status") => {
             let client = reqwest::Client::builder()
                 .danger_accept_invalid_certs(true)
-                .timeout(Duration::from_millis(500))
+                .timeout(Duration::from_millis(800))
                 .build()
                 .ok();
 
+            let vnc_ip = vnc_host.as_str();
             let (chrome_attached, desktop_active) = if let Some(ref c) = client {
                 let chrome = c.get("http://127.0.0.1:9222/json/version").send().await.is_ok();
-                let novnc = c.get("http://127.0.0.1:6080").send().await.is_ok()
+                let novnc = c.get(format!("http://{}:6080", vnc_ip)).send().await.is_ok()
+                    || c.get(format!("http://{}:6081", vnc_ip)).send().await.is_ok()
+                    || c.get("http://127.0.0.1:6080").send().await.is_ok()
                     || c.get("http://127.0.0.1:6081").send().await.is_ok()
                     || c.get("http://127.0.0.1:8444").send().await.is_ok();
                 (chrome, novnc)
@@ -180,7 +190,8 @@ async fn handle_connection(
                 "chrome_attached": chrome_attached,
                 "desktop_active": desktop_active,
                 "novnc_active": desktop_active,
-                "kasm_active": desktop_active
+                "kasm_active": desktop_active,
+                "vnc_host": vnc_ip
             });
             send_json_response(&mut stream, 200, &body).await?;
         }
@@ -618,13 +629,15 @@ mod tests {
 
         let ws = Arc::new(temp_dir.clone());
         let gw = Arc::new("http://127.0.0.1:50051".to_string());
+        let vnc = Arc::new("34.106.12.222".to_string());
 
         let server_task = tokio::spawn(async move {
             while let Ok((stream, _)) = listener.accept().await {
                 let ws_c = ws.clone();
                 let gw_c = gw.clone();
+                let vnc_c = vnc.clone();
                 tokio::spawn(async move {
-                    let _ = handle_connection(stream, ws_c, gw_c).await;
+                    let _ = handle_connection(stream, ws_c, gw_c, vnc_c).await;
                 });
             }
         });

@@ -518,12 +518,16 @@
           <span style="font-size: 0.72rem; color: #3fb950; background: rgba(63, 185, 80, 0.1); padding: 2px 8px; border-radius: 12px; border: 1px solid rgba(63, 185, 80, 0.3);">Real-Time Stream</span>
         </div>
         <div style="display: flex; align-items: center; gap: 8px;">
-          <div style="display: flex; gap: 4px;">
-            <button class="btn" onclick="selectScreen(6080)" style="padding: 4px 8px; font-size: 0.75rem;">Screen :1</button>
-            <button class="btn" onclick="selectScreen(6081, 'screen4')" style="padding: 4px 8px; font-size: 0.75rem;">Screen :4</button>
-            <button class="btn" onclick="selectScreen(6081, 'screen7')" style="padding: 4px 8px; font-size: 0.75rem;">Screen :7</button>
+          <div style="display: flex; align-items: center; gap: 4px; background: rgba(0,0,0,0.3); padding: 2px 6px; border-radius: 6px; border: 1px solid var(--surface-border);">
+            <span style="font-size: 0.72rem; color: var(--text-muted);">Host:</span>
+            <input type="text" id="vnc-host-input" value="34.106.12.222" style="background: transparent; border: none; color: var(--text); font-size: 0.75rem; width: 105px; outline: none;" onchange="updateVncHost(this.value)" />
           </div>
-          <input type="text" id="kasm-url-input" value="" placeholder="noVNC URL (http://<host>:6080/vnc.html)" style="background: var(--surface-hover); border: 1px solid var(--surface-border); color: var(--text); padding: 5px 10px; border-radius: 6px; font-size: 0.8rem; width: 240px;" />
+          <div style="display: flex; gap: 4px;">
+            <button class="btn" onclick="selectScreen(6080)" style="padding: 4px 8px; font-size: 0.75rem;">User 1 (:1)</button>
+            <button class="btn" onclick="selectScreen(6081, 'user2')" style="padding: 4px 8px; font-size: 0.75rem;">User 2 (:2)</button>
+            <button class="btn" onclick="selectScreen(6081, 'user3')" style="padding: 4px 8px; font-size: 0.75rem;">User 3 (:3)</button>
+          </div>
+          <input type="text" id="kasm-url-input" value="" placeholder="noVNC URL (http://<host>:6080/vnc.html)" style="background: var(--surface-hover); border: 1px solid var(--surface-border); color: var(--text); padding: 5px 10px; border-radius: 6px; font-size: 0.8rem; width: 220px;" />
           <button class="btn" id="kasm-connect-btn" style="padding: 5px 12px; font-size: 0.8rem;">Connect</button>
           <button class="btn" id="kasm-open-tab-btn" title="Open in new browser tab" style="padding: 5px 10px; font-size: 0.8rem;">↗ Tab</button>
           <button class="btn" id="kasm-fullscreen-btn" title="Toggle Fullscreen" style="padding: 5px 10px; font-size: 0.8rem;">⛶ Fullscreen</button>
@@ -577,8 +581,22 @@
     const kasmOpenTabBtn = document.getElementById("kasm-open-tab-btn");
     const kasmFullscreenBtn = document.getElementById("kasm-fullscreen-btn");
 
+    let currentVncHost = localStorage.getItem("syntropy_vnc_host") || (window.location.hostname && window.location.hostname !== "127.0.0.1" && window.location.hostname !== "localhost" ? window.location.hostname : "34.106.12.222");
+    const vncHostInput = document.getElementById("vnc-host-input");
+    if (vncHostInput) {
+      vncHostInput.value = currentVncHost;
+    }
+
+    function updateVncHost(val) {
+      if (val && val.trim()) {
+        currentVncHost = val.trim();
+        localStorage.setItem("syntropy_vnc_host", currentVncHost);
+        selectScreen(6080);
+      }
+    }
+
     function getVncUrl(port, token) {
-      const host = window.location.hostname || "127.0.0.1";
+      const host = currentVncHost || "34.106.12.222";
       if (token) {
         return `http://${host}:${port}/vnc.html?autoconnect=true&resize=scale&token=${token}`;
       }
@@ -682,8 +700,13 @@
             chromeBadge.style.borderColor = "var(--surface-border)";
           }
 
+          if (data.vnc_host && !localStorage.getItem("syntropy_vnc_host")) {
+            currentVncHost = data.vnc_host;
+            if (vncHostInput) vncHostInput.value = currentVncHost;
+          }
+
           if (data.desktop_active || data.novnc_active || data.kasm_active) {
-            kasmLabel.innerText = "Desktop: Connected (:6080)";
+            kasmLabel.innerText = `User 1: Connected (${currentVncHost}:6080)`;
             kasmBadge.style.borderColor = "#3fb950";
           } else {
             kasmLabel.innerText = "Cloud Desktop";

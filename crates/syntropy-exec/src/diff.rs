@@ -293,6 +293,7 @@ impl AtomicPatchApplicator {
 
         // Perform atomic rename
         let rename_res = fs::rename(&shadow_path, path);
+        #[allow(unused_variables)]
         if let Err(err) = rename_res {
             #[cfg(windows)]
             {
