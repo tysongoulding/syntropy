@@ -2,7 +2,7 @@ use std::collections::HashMap;
 use std::sync::Arc;
 use tokio::sync::Mutex;
 use syntropy_proto::tunnel::{
-    self, AgentMessage, ApplyPatch, ExecCommand, TunnelServerFrame, UserPrompt,
+    self, AgentMessage, ApplyPatch, ExecCommand, McpInvokeRequest, TunnelServerFrame, UserPrompt,
 };
 use tracing::info;
 
@@ -68,8 +68,11 @@ impl AgentTurnEngine {
             "You are an autonomous engineering agent connected to host workspace via Syntropy.\n\
              Host Operating System: {host_platform}\n\
              Agent ID: {agent_id}\n\
-             You have access to tools: 'exec_command' (run commands inside the canonical virtual PTY sandbox) and 'apply_patch' (apply atomic diffs).\n\
-             Always formulate valid executable commands for the host operating system."
+             You have access to tools:\n\
+             - 'exec_command': run commands inside the canonical virtual PTY sandbox\n\
+             - 'apply_patch': apply atomic diffs\n\
+             - 'browser_action': navigate, click, inspect, or screenshot the local Chrome browser over Chrome DevTools Protocol (CDP)\n\
+             Always formulate valid executable commands or browser actions for the host operating system."
         );
 
         let history = if !prompt.session_id.is_empty() {
@@ -150,6 +153,21 @@ impl AgentTurnEngine {
                         frame_id: uuid::Uuid::new_v4().to_string(),
                         timestamp_unix_ms: chrono::Utc::now().timestamp_millis(),
                         payload: Some(tunnel::tunnel_server_frame::Payload::ApplyPatch(patch)),
+                    });
+                }
+                "browser_action" => {
+                    let mcp_req = McpInvokeRequest {
+                        invocation_id: format!("browser-{}", uuid::Uuid::new_v4()),
+                        server_name: "browser".to_string(),
+                        tool_name: "browser_action".to_string(),
+                        arguments_json: tc.args.to_string(),
+                        timeout_seconds: 30,
+                    };
+
+                    server_frames.push(TunnelServerFrame {
+                        frame_id: uuid::Uuid::new_v4().to_string(),
+                        timestamp_unix_ms: chrono::Utc::now().timestamp_millis(),
+                        payload: Some(tunnel::tunnel_server_frame::Payload::McpRequest(mcp_req)),
                     });
                 }
                 _ => {}

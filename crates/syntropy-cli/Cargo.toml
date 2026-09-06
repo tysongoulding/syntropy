@@ -28,3 +28,7 @@ chrono = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 rusqlite = { workspace = true }
+webrtc = "0.20"
+reqwest = { workspace = true }
+tokio-tungstenite = "0.26"
+futures = { workspace = true }

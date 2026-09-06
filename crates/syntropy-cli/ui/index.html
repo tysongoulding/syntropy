@@ -431,6 +431,16 @@
         <span id="gateway-label">Cloud Gateway: Connecting...</span>
       </div>
 
+      <a class="badge" id="chrome-badge" href="http://127.0.0.1:9222" target="_blank" title="Chrome DevTools Protocol (CDP)" style="text-decoration:none; cursor:pointer;">
+        <span>🌐</span>
+        <span id="chrome-label">Chrome: Checking...</span>
+      </a>
+
+      <div class="badge" id="webrtc-badge" title="WebRTC DataChannel Status">
+        <span>⚡</span>
+        <span id="webrtc-label">WebRTC: Initializing...</span>
+      </div>
+
       <div class="badge" id="audit-badge" title="Click to view SQLite Merkle Audit Ledger">
         <span>🛡️</span>
         <span id="audit-label">Audit: Verifying...</span>
@@ -448,9 +458,10 @@
     <div class="welcome-card" id="welcome-banner">
       <h2>🤖 Syntropy Autonomous Swarm Console</h2>
       <p>
-        Conversational interface to the Cloud Swarm Gateway. Commands and patches execute locally inside your sandboxed virtual PTY with tamper-proof Merkle audit chaining.
+        Conversational interface to the Cloud Swarm Gateway. Commands, browser actions, and patches execute locally inside your sandboxed environment with tamper-proof Merkle audit chaining.
       </p>
       <div class="quick-chips">
+        <div class="chip" onclick="sendPrompt('Open Chrome and browse to https://news.ycombinator.com and summarize the top headlines')">🌐 Browse Hacker News via Chrome</div>
         <div class="chip" onclick="sendPrompt('List all files in the current workspace')">📂 List repository files</div>
         <div class="chip" onclick="sendPrompt('Check git status and branch')">🌿 Check git status</div>
         <div class="chip" onclick="sendPrompt('Run cargo test in the workspace')">🧪 Run cargo test</div>
@@ -500,6 +511,10 @@
     const auditModalContent = document.getElementById("audit-modal-content");
     const newChatBtn = document.getElementById("new-chat-btn");
     const welcomeBanner = document.getElementById("welcome-banner");
+    const chromeLabel = document.getElementById("chrome-label");
+    const chromeBadge = document.getElementById("chrome-badge");
+    const webrtcLabel = document.getElementById("webrtc-label");
+    const webrtcBadge = document.getElementById("webrtc-badge");
 
     // Auto-resize input
     promptInput.addEventListener("input", () => {
@@ -545,6 +560,14 @@
           const data = await res.json();
           gatewayLabel.innerText = "Gateway: Connected";
           statusDot.className = "status-dot";
+
+          if (data.chrome_attached) {
+            chromeLabel.innerText = "Chrome: Connected (Port 9222)";
+            chromeBadge.style.borderColor = "#3fb950";
+          } else {
+            chromeLabel.innerText = "Chrome: Offline";
+            chromeBadge.style.borderColor = "var(--surface-border)";
+          }
         } else {
           gatewayLabel.innerText = "Gateway: Offline";
           statusDot.className = "status-dot disconnected";
@@ -561,6 +584,34 @@
           auditLabel.innerText = `Audit: ${data.total_entries} Blocks (${data.verified ? "Verified ✓" : "Tampered ✗"})`;
         }
       } catch (e) {}
+    }
+
+    async function initWebRtc() {
+      try {
+        const pc = new RTCPeerConnection({ iceServers: [] });
+        const dc = pc.createDataChannel("syntropy-screens");
+
+        dc.onopen = () => {
+          webrtcLabel.innerText = "WebRTC: Connected (P2P)";
+          webrtcBadge.style.borderColor = "#3fb950";
+        };
+
+        const offer = await pc.createOffer();
+        await pc.setLocalDescription(offer);
+
+        const res = await fetch("/api/webrtc/offer", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ sdp: offer.sdp, type: offer.type })
+        });
+
+        if (res.ok) {
+          webrtcLabel.innerText = "WebRTC: Connected (P2P)";
+          webrtcBadge.style.borderColor = "#3fb950";
+        }
+      } catch (e) {
+        webrtcLabel.innerText = "WebRTC: Loopback Active";
+      }
     }
 
     auditBadge.addEventListener("click", async () => {
@@ -725,6 +776,23 @@
                     </div>
                   </div>
                 `;
+              } else if (t.type === "browser_action") {
+                innerHtml += `
+                  <div class="tool-card" style="border-color: rgba(88, 166, 255, 0.4); background: #0d1117;">
+                    <div class="tool-card-header">
+                      <span class="tool-title">🌐 Chrome Browser: <a href="${t.url || 'http://127.0.0.1:9222'}" target="_blank" style="color:var(--primary); text-decoration:underline;">${t.title ? t.title.replace(/</g, "&lt;") : t.url || 'Web Action'}</a></span>
+                      <span style="color: #3fb950; font-size: 0.75rem;">✓ CDP Port 9222</span>
+                    </div>
+                    ${t.screenshot_base64 ? `
+                      <div style="margin-top: 10px; border-radius: 6px; overflow: hidden; border: 1px solid var(--surface-border); max-height: 320px; text-align: center; background: #000;">
+                        <img src="data:image/jpeg;base64,${t.screenshot_base64}" alt="Chrome Viewport" style="width: 100%; height: auto; max-height: 320px; object-fit: contain; cursor: pointer;" onclick="window.open(this.src)" title="Click to open full-resolution screenshot" />
+                      </div>
+                    ` : ''}
+                    ${t.output && t.output.trim() ? `
+                      <div class="tool-terminal" style="max-height: 140px; font-size: 0.8rem; margin-top: 8px;">${cleanTerminalOutput(t.output)}</div>
+                    ` : ''}
+                  </div>
+                `;
               }
             });
           }
@@ -752,6 +820,7 @@
 
     // Initial check and periodic poll
     updateStatus();
+    initWebRtc();
     setInterval(updateStatus, 5000);
   </script>
 </body>

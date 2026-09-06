@@ -162,6 +162,24 @@ impl GeminiClient {
                             },
                             "required": ["file_path", "diff"]
                         }
+                    },
+                    {
+                        "name": "browser_action",
+                        "description": "Perform web browsing, page navigation, inspection, and screenshot capture in the user's local Chrome browser via Chrome DevTools Protocol (CDP)",
+                        "parameters": {
+                            "type": "object",
+                            "properties": {
+                                "action": {
+                                    "type": "string",
+                                    "enum": ["navigate", "screenshot", "get_content", "click", "evaluate"],
+                                    "description": "Action to perform: 'navigate' to load a URL, 'screenshot' to capture page image, 'get_content' to read page text, 'click' to click an element, 'evaluate' to run JS"
+                                },
+                                "url": { "type": "string", "description": "URL to navigate to (e.g. 'https://www.google.com')" },
+                                "selector": { "type": "string", "description": "CSS selector to click or query" },
+                                "text": { "type": "string", "description": "Text or JavaScript to evaluate" }
+                            },
+                            "required": ["action"]
+                        }
                     }
                 ]
             }]
@@ -220,6 +238,23 @@ impl GeminiClient {
                 }),
             });
             "Syntropy Dev Mock: Applying mock patch.".into()
+        } else if p_lower.contains("browse") || p_lower.contains("web") || p_lower.contains("chrome") || p_lower.contains("http") || p_lower.contains("google") {
+            let target_url = if p_lower.contains("ycombinator") || p_lower.contains("hacker") {
+                "https://news.ycombinator.com"
+            } else if p_lower.contains("google") {
+                "https://www.google.com"
+            } else {
+                "https://github.com"
+            };
+
+            tool_calls.push(GeminiToolCall {
+                name: "browser_action".into(),
+                args: json!({
+                    "action": "navigate",
+                    "url": target_url
+                }),
+            });
+            format!("Syntropy Dev Mock: Navigating to '{}' via Chrome CDP.", target_url)
         } else {
             format!("Syntropy Dev Mock: Received prompt '{}'. Swarm reasoning complete.", prompt)
         };

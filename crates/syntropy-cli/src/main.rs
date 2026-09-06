@@ -15,6 +15,7 @@ use syntropy_security::{CredentialBroker, KeyStore, MerkleAuditLedger, OAuthSess
 use syntropy_tunnel::{MockGatewayServer, TunnelClient, TunnelConfig};
 
 mod ui;
+pub mod browser;
 
 #[derive(Parser)]
 #[command(name = "syntropy")]

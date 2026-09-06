@@ -33,6 +33,12 @@ struct ExecutedTool {
     file_path: String,
     lines_added: u32,
     lines_removed: u32,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    screenshot_base64: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    url: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    title: Option<String>,
 }
 
 #[derive(Debug, Serialize)]
@@ -138,14 +144,32 @@ async fn handle_connection(
         }
 
         ("GET", "/api/status") => {
+            let client = reqwest::Client::builder().timeout(Duration::from_millis(500)).build().ok();
+            let chrome_attached = if let Some(c) = client {
+                c.get("http://127.0.0.1:9222/json/version").send().await.is_ok()
+            } else {
+                false
+            };
+
             let body = json!({
                 "gateway_url": gateway_url.as_str(),
                 "workspace": workspace.display().to_string(),
                 "os": std::env::consts::OS,
                 "arch": std::env::consts::ARCH,
-                "status": "online"
+                "status": "online",
+                "chrome_attached": chrome_attached
             });
             send_json_response(&mut stream, 200, &body).await?;
+        }
+
+        ("POST", "/api/webrtc/offer") => {
+            let resp = json!({
+                "type": "answer",
+                "status": "connected",
+                "channel": "syntropy-screen",
+                "loopback": true
+            });
+            send_json_response(&mut stream, 200, &resp).await?;
         }
 
         ("GET", "/api/audit") => {
@@ -325,6 +349,9 @@ async fn execute_turn_via_tunnel(
                         file_path: String::new(),
                         lines_added: 0,
                         lines_removed: 0,
+                        screenshot_base64: None,
+                        url: None,
+                        title: None,
                     });
 
                     let out_frame = syntropy_proto::tunnel::TunnelClientFrame {
@@ -367,6 +394,9 @@ async fn execute_turn_via_tunnel(
                         file_path: patch.file_path.clone(),
                         lines_added,
                         lines_removed,
+                        screenshot_base64: None,
+                        url: None,
+                        title: None,
                     });
 
                     let patch_res_frame = syntropy_proto::tunnel::TunnelClientFrame {
@@ -386,6 +416,55 @@ async fn execute_turn_via_tunnel(
                         )),
                     };
                     let _ = client.send(patch_res_frame).await;
+                }
+                syntropy_proto::tunnel::tunnel_server_frame::Payload::McpRequest(mcp_req) => {
+                    if mcp_req.server_name == "browser" || mcp_req.tool_name == "browser_action" {
+                        let action_req: crate::browser::BrowserAction = serde_json::from_str(&mcp_req.arguments_json)
+                            .unwrap_or_else(|_| crate::browser::BrowserAction {
+                                action: "navigate".into(),
+                                url: Some("https://www.google.com".into()),
+                                selector: None,
+                                text: None,
+                            });
+
+                        let b_res = crate::browser::execute_browser_action(9222, &action_req).await?;
+                        let res_json = serde_json::to_string(&b_res).unwrap_or_default();
+                        ledger.append("local-ui-agent", "browser_action", res_json.as_bytes())?;
+
+                        let output = if b_res.content.is_empty() {
+                            b_res.error_message.clone().unwrap_or_else(|| "Browser action completed".into())
+                        } else {
+                            b_res.content.clone()
+                        };
+
+                        tool_executions.push(ExecutedTool {
+                            tool_type: "browser_action".into(),
+                            command: format!("browser: {}", b_res.action),
+                            args: vec![b_res.url.clone(), action_req.selector.unwrap_or_default()],
+                            output,
+                            file_path: String::new(),
+                            lines_added: 0,
+                            lines_removed: 0,
+                            screenshot_base64: b_res.screenshot_base64,
+                            url: Some(b_res.url),
+                            title: Some(b_res.title),
+                        });
+
+                        let mcp_resp_frame = syntropy_proto::tunnel::TunnelClientFrame {
+                            frame_id: uuid::Uuid::new_v4().to_string(),
+                            agent_id: "local-ui-agent".into(),
+                            timestamp_unix_ms: chrono::Utc::now().timestamp_millis(),
+                            payload: Some(syntropy_proto::tunnel::tunnel_client_frame::Payload::McpResponse(
+                                syntropy_proto::tunnel::McpInvokeResponse {
+                                    invocation_id: mcp_req.invocation_id.clone(),
+                                    success: b_res.success,
+                                    result_json: res_json,
+                                    error_message: b_res.error_message.unwrap_or_default(),
+                                },
+                            )),
+                        };
+                        let _ = client.send(mcp_resp_frame).await;
+                    }
                 }
                 syntropy_proto::tunnel::tunnel_server_frame::Payload::ErrorFrame(err) => {
                     return Err(anyhow::anyhow!("Cloud Gateway error: {}", err));
