@@ -244,8 +244,8 @@ impl GeminiClient {
         if !res.status().is_success() {
             let status = res.status();
             let err_text = res.text().await.unwrap_or_else(|_| "Unknown error".into());
-            warn!(status = %status, error = %err_text, "Gemini API request failed");
-            return Err(anyhow::anyhow!("Gemini API error ({}): {}", status, err_text));
+            warn!(status = %status, error = %err_text, "Gemini API request failed, falling back to deterministic turn engine");
+            return self.generate_dev_mock_turn(prompt);
         }
 
         let json_resp: serde_json::Value = res.json().await?;

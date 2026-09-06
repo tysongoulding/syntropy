@@ -62,6 +62,16 @@ struct AuditEntryView {
     previous_hash: String,
 }
 
+fn is_remote_target(vnc_ip: &str) -> bool {
+    if vnc_ip == "127.0.0.1" || vnc_ip == "localhost" || vnc_ip == "0.0.0.0" {
+        return false;
+    }
+    if cfg!(target_os = "linux") && vnc_ip == "34.106.12.222" {
+        return false;
+    }
+    true
+}
+
 /// Starts the local embedded HTTP UI server.
 pub async fn start_ui_server(
     host: &str,
@@ -80,7 +90,13 @@ pub async fn start_ui_server(
         format!("http://{}", local_addr)
     };
 
-    let target_vnc = vnc_host.unwrap_or_else(|| "34.106.12.222".to_string());
+    let target_vnc = vnc_host.unwrap_or_else(|| {
+        if cfg!(target_os = "linux") {
+            "127.0.0.1".to_string()
+        } else {
+            "34.106.12.222".to_string()
+        }
+    });
 
     info!("🚀 Syntropy UI server listening at {}:{}", host, port);
     println!("\n========================================================");
@@ -137,14 +153,57 @@ async fn handle_connection(
     vnc_host: Arc<String>,
     shared_ledger: Arc<tokio::sync::Mutex<Option<MerkleAuditLedger>>>,
 ) -> Result<(), anyhow::Error> {
-    let mut buffer = [0u8; 8192];
-    let n = stream.read(&mut buffer).await?;
-    if n == 0 {
+    let mut data = Vec::new();
+    let mut buffer = [0u8; 4096];
+    let mut header_end = None;
+    let mut expected_len = None;
+
+    while data.len() < 131072 {
+        let n = stream.read(&mut buffer).await?;
+        if n == 0 {
+            break;
+        }
+        data.extend_from_slice(&buffer[..n]);
+
+        if header_end.is_none() {
+            if let Some(pos) = data.windows(4).position(|w| w == b"\r\n\r\n") {
+                header_end = Some(pos + 4);
+                let header_str = String::from_utf8_lossy(&data[..pos]);
+                for line in header_str.lines() {
+                    let l_lower = line.to_lowercase();
+                    if let Some(val) = l_lower.strip_prefix("content-length:") {
+                        if let Ok(len) = val.trim().parse::<usize>() {
+                            expected_len = Some(len);
+                        }
+                    }
+                }
+            }
+        }
+
+        if let Some(h_end) = header_end {
+            let body_len = data.len() - h_end;
+            if let Some(exp) = expected_len {
+                if body_len >= exp {
+                    break;
+                }
+            } else {
+                break;
+            }
+        }
+    }
+
+    if data.is_empty() {
         return Ok(());
     }
 
-    let raw = String::from_utf8_lossy(&buffer[..n]);
-    let mut lines = raw.lines();
+    let (header_bytes, body_bytes) = if let Some(h_end) = header_end {
+        (&data[..h_end - 4], &data[h_end..])
+    } else {
+        (data.as_slice(), &[][..])
+    };
+
+    let raw_headers = String::from_utf8_lossy(header_bytes);
+    let mut lines = raw_headers.lines();
     let request_line = match lines.next() {
         Some(l) => l,
         None => return Ok(()),
@@ -153,13 +212,7 @@ async fn handle_connection(
     let mut parts = request_line.split_whitespace();
     let method = parts.next().unwrap_or("GET");
     let path = parts.next().unwrap_or("/");
-
-    // Extract body if Content-Length is present
-    let body = if let Some(idx) = raw.find("\r\n\r\n") {
-        &raw[idx + 4..]
-    } else {
-        ""
-    };
+    let body = std::str::from_utf8(body_bytes).unwrap_or("");
 
     match (method, path) {
         ("GET", "/") | ("GET", "/index.html") => {
@@ -175,7 +228,7 @@ async fn handle_connection(
 
         ("GET", "/api/status") => {
             let vnc_ip = vnc_host.as_str();
-            let is_remote = vnc_ip != "127.0.0.1" && vnc_ip != "localhost";
+            let is_remote = is_remote_target(vnc_ip);
 
             if is_remote {
                 let remote_url = format!("http://{}:3000/api/status", vnc_ip);
@@ -235,7 +288,7 @@ async fn handle_connection(
 
         ("GET", "/api/audit") => {
             let vnc_ip = vnc_host.as_str();
-            let is_remote = vnc_ip != "127.0.0.1" && vnc_ip != "localhost";
+            let is_remote = is_remote_target(vnc_ip);
 
             if is_remote {
                 let remote_url = format!("http://{}:3000/api/audit", vnc_ip);
@@ -292,7 +345,7 @@ async fn handle_connection(
 
         ("GET", "/api/key") => {
             let vnc_ip = vnc_host.as_str();
-            let is_remote = vnc_ip != "127.0.0.1" && vnc_ip != "localhost";
+            let is_remote = is_remote_target(vnc_ip);
 
             if is_remote {
                 let remote_url = format!("http://{}:3000/api/key", vnc_ip);
@@ -325,7 +378,7 @@ async fn handle_connection(
 
         ("POST", "/api/key") => {
             let vnc_ip = vnc_host.as_str();
-            let is_remote = vnc_ip != "127.0.0.1" && vnc_ip != "localhost";
+            let is_remote = is_remote_target(vnc_ip);
 
             let parsed: Value = serde_json::from_str(body).unwrap_or_default();
             let raw_key = parsed.get("api_key")
@@ -366,7 +419,7 @@ async fn handle_connection(
 
         ("POST", "/api/clear") => {
             let vnc_ip = vnc_host.as_str();
-            let is_remote = vnc_ip != "127.0.0.1" && vnc_ip != "localhost";
+            let is_remote = is_remote_target(vnc_ip);
 
             if is_remote {
                 let remote_url = format!("http://{}:3000/api/clear", vnc_ip);
@@ -389,7 +442,7 @@ async fn handle_connection(
             };
 
             let vnc_ip = vnc_host.as_str();
-            let is_remote = vnc_ip != "127.0.0.1" && vnc_ip != "localhost";
+            let is_remote = is_remote_target(vnc_ip);
 
             if is_remote {
                 let remote_url = format!("http://{}:3000/api/chat", vnc_ip);
